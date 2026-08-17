@@ -3,7 +3,7 @@ import threading
 import time
 from datetime import date, datetime
 
-from . import ai, db
+from . import db, worker
 
 logger = logging.getLogger("bitewise.scheduler")
 
@@ -30,11 +30,6 @@ def _tick() -> None:
         return
     if not db.day_has_done_meals(today):
         return
-    logger.info("generating daily advice for %s", today)
-    generate(today)
-
-
-def generate(day: str) -> str:
-    advice = ai.daily_advice(day)
-    db.save_advice(day, advice)
-    return advice
+    logger.info("queueing daily advice for %s", today)
+    db.create_advice_job(today)
+    worker.enqueue_advice(today)

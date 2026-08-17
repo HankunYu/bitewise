@@ -7,34 +7,60 @@ from . import ai, db
 
 logger = logging.getLogger("bitewise.worker")
 
-_queue: queue.Queue[int] = queue.Queue()
+# Jobs are (kind, key): ("meal", meal_id) or ("advice", date).
+_queue: queue.Queue[tuple[str, int | str]] = queue.Queue()
 
 
-def enqueue(meal_id: int) -> None:
-    _queue.put(meal_id)
+def enqueue_meal(meal_id: int) -> None:
+    _queue.put(("meal", meal_id))
+
+
+def enqueue_advice(date: str) -> None:
+    _queue.put(("advice", date))
 
 
 def start() -> None:
     # Requeue anything left unfinished by a previous run.
     for meal_id in db.unfinished_meal_ids():
-        _queue.put(meal_id)
+        _queue.put(("meal", meal_id))
+    for advice_date in db.unfinished_advice_dates():
+        _queue.put(("advice", advice_date))
     threading.Thread(target=_run, daemon=True, name="bitewise-worker").start()
 
 
 def _run() -> None:
     while True:
-        meal_id = _queue.get()
+        kind, key = _queue.get()
         try:
-            _process(meal_id)
+            if kind == "meal":
+                _process_meal(key)
+            else:
+                _process_advice(key)
         except ai.AIError as exc:
-            logger.warning("meal %s failed: %s", meal_id, exc)
-            db.update_meal(meal_id, {"status": "failed", "error": str(exc)})
+            logger.warning("%s %s failed: %s", kind, key, exc)
+            _mark_failed(kind, key, str(exc))
         except Exception:
-            logger.exception("meal %s crashed", meal_id)
-            db.update_meal(meal_id, {"status": "failed", "error": "internal error, see logs"})
+            logger.exception("%s %s crashed", kind, key)
+            _mark_failed(kind, key, "internal error, see logs")
 
 
-def _process(meal_id: int) -> None:
+def _mark_failed(kind: str, key: int | str, error: str) -> None:
+    if kind == "meal":
+        db.update_meal(key, {"status": "failed", "error": error})
+    else:
+        db.update_advice(key, {"status": "failed", "error": error})
+
+
+def _process_advice(date: str) -> None:
+    row = db.get_advice(date)
+    if row is None or row["status"] == "done":
+        return
+    db.update_advice(date, {"status": "processing", "error": None})
+    db.save_advice(date, ai.daily_advice(date))
+    logger.info("advice %s done", date)
+
+
+def _process_meal(meal_id: int) -> None:
     meal = db.get_meal(meal_id)
     if meal is None or meal["status"] == "done":
         return

@@ -64,7 +64,7 @@ async def upload(image: UploadFile | None = File(None), text: str = Form("")):
         image_path = f"uploads/{name}"
 
     meal_id = db.insert_meal(db.now_iso(), text, image_path)
-    worker.enqueue(meal_id)
+    worker.enqueue_meal(meal_id)
     return {"type": "meal", "id": meal_id, "status": "pending"}
 
 
@@ -87,7 +87,11 @@ def get_day(day: str):
         "meals": meals,
         "totals": totals,
         "target": int(db.get_setting("daily_kcal_target")),
-        "advice": advice["advice"] if advice else None,
+        "advice": {
+            "text": advice["advice"] or None,
+            "status": advice["status"],
+            "error": advice["error"],
+        } if advice else None,
         "weight": weight,
     }
 
@@ -137,7 +141,7 @@ def retry_meal(meal_id: int):
     if meal["status"] != "failed":
         raise HTTPException(400, f"meal is {meal['status']}, only failed meals can be retried")
     db.update_meal(meal_id, {"status": "pending", "error": None})
-    worker.enqueue(meal_id)
+    worker.enqueue_meal(meal_id)
     return {"id": meal_id, "status": "pending"}
 
 
@@ -189,7 +193,9 @@ def generate_advice(day: str):
     day = _parse_date(day)
     if not db.day_has_done_meals(day):
         raise HTTPException(400, "no finished meals on that day")
-    return {"date": day, "advice": scheduler.generate(day)}
+    db.create_advice_job(day)
+    worker.enqueue_advice(day)
+    return {"date": day, "status": "pending"}
 
 
 # ---------- settings ----------

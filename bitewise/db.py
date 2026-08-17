@@ -35,7 +35,9 @@ CREATE INDEX IF NOT EXISTS idx_weights_measured_at ON weights(measured_at);
 
 CREATE TABLE IF NOT EXISTS daily_advice (
     date TEXT PRIMARY KEY,
-    advice TEXT NOT NULL,
+    advice TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    error TEXT,
     generated_at TEXT NOT NULL
 );
 
@@ -70,11 +72,21 @@ def get_conn():
 def init_db() -> None:
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         for key, value in config.DEFAULT_SETTINGS.items():
             conn.execute(
                 "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
                 (key, value),
             )
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    advice_cols = {r["name"] for r in conn.execute("PRAGMA table_info(daily_advice)")}
+    if "status" not in advice_cols:
+        # Pre-status rows only exist for successfully generated advice.
+        conn.execute("ALTER TABLE daily_advice ADD COLUMN status TEXT NOT NULL DEFAULT 'done'")
+    if "error" not in advice_cols:
+        conn.execute("ALTER TABLE daily_advice ADD COLUMN error TEXT")
 
 
 # ---------- settings ----------
@@ -251,10 +263,39 @@ def get_advice(date: str) -> dict | None:
     return dict(row) if row else None
 
 
+def create_advice_job(date: str) -> None:
+    """Insert or reset the row to pending; previous advice text is kept while regenerating."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO daily_advice (date, advice, status, generated_at) VALUES (?, '', 'pending', ?) "
+            "ON CONFLICT(date) DO UPDATE SET status = 'pending', error = NULL",
+            (date, now_iso()),
+        )
+
+
+def update_advice(date: str, fields: dict) -> None:
+    columns = ", ".join(f"{k} = ?" for k in fields)
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE daily_advice SET {columns} WHERE date = ?",
+            (*fields.values(), date),
+        )
+
+
 def save_advice(date: str, advice: str) -> None:
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO daily_advice (date, advice, generated_at) VALUES (?, ?, ?) "
-            "ON CONFLICT(date) DO UPDATE SET advice = excluded.advice, generated_at = excluded.generated_at",
+            "INSERT INTO daily_advice (date, advice, status, error, generated_at) VALUES (?, ?, 'done', NULL, ?) "
+            "ON CONFLICT(date) DO UPDATE SET advice = excluded.advice, status = 'done', error = NULL, "
+            "generated_at = excluded.generated_at",
             (date, advice, now_iso()),
         )
+
+
+def unfinished_advice_dates() -> list[str]:
+    """Advice jobs left pending/processing (e.g. after a restart)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT date FROM daily_advice WHERE status IN ('pending', 'processing') ORDER BY date"
+        ).fetchall()
+    return [r["date"] for r in rows]

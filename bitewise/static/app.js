@@ -87,7 +87,8 @@ async function loadDay() {
   renderSummary(data);
   renderAdvice(data);
   renderMeals(data);
-  const busy = data.meals.some((m) => m.status === "pending" || m.status === "processing");
+  const busy = data.meals.some((m) => m.status === "pending" || m.status === "processing")
+    || adviceBusy(data.advice);
   if (busy && state.view === "today") {
     state.pollTimer = setTimeout(loadDay, 8000);
   }
@@ -119,26 +120,42 @@ function renderSummary(data) {
     </div>`;
 }
 
+function adviceBusy(advice) {
+  return !!advice && (advice.status === "pending" || advice.status === "processing");
+}
+
 function renderAdvice(data) {
   const box = $("#advice-box");
   const hasMeals = data.totals.kcal > 0;
-  const btnLabel = data.advice ? "重新生成" : "生成建议";
-  box.innerHTML = `
-    ${data.advice ? `<div class="advice-text">${escapeHtml(data.advice)}</div>`
-                  : `<div class="advice-empty">还没有当日建议${hasMeals ? "" : "(先记一顿饭)"}</div>`}
-    ${hasMeals ? `<div style="margin-top:8px"><button class="link-btn" id="advice-gen">${btnLabel}</button></div>` : ""}`;
+  const adv = data.advice;
+  const busy = adviceBusy(adv);
+  const failed = !!adv && adv.status === "failed";
+  const parts = [];
+  if (adv && adv.text) {
+    parts.push(`<div class="advice-text">${escapeHtml(adv.text)}</div>`);
+  } else if (!busy && !failed) {
+    parts.push(`<div class="advice-empty">还没有当日建议${hasMeals ? "" : "(先记一顿饭)"}</div>`);
+  }
+  if (failed) {
+    parts.push(`<div class="advice-empty meal-status failed">生成失败:${escapeHtml(adv.error || "未知错误")}</div>`);
+  }
+  if (hasMeals) {
+    const label = busy ? "生成中…" : failed ? "重试" : adv && adv.text ? "重新生成" : "生成建议";
+    parts.push(`<div style="margin-top:8px"><button class="link-btn" id="advice-gen"${busy ? " disabled" : ""}>${label}</button></div>`);
+  }
+  box.innerHTML = parts.join("");
   const btn = $("#advice-gen");
-  if (btn) {
+  if (btn && !busy) {
     btn.addEventListener("click", async () => {
-      btn.textContent = "生成中…(约半分钟)";
       btn.disabled = true;
       try {
         await apiJSON(`/api/advice/${data.date}/generate`, "POST", {});
-        loadDay();
       } catch (err) {
         btn.textContent = `失败:${err.message},点击重试`;
         btn.disabled = false;
+        return;
       }
+      loadDay();
     });
   }
 }
