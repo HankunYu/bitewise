@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>bitewise</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍜</text></svg>">
+</head>
+<body>
+<header>
+  <h1>🍜 bitewise</h1>
+  <nav>
+    <button data-view="today" class="active">今日</button>
+    <button data-view="trends">趋势</button>
+    <button data-view="settings">设置</button>
+  </nav>
+</header>
+<main>
+  <section id="view-today">
+    <div class="date-nav">
+      <button id="day-prev">‹</button>
+      <span class="current" id="day-label"></span>
+      <button id="day-next">›</button>
+    </div>
+    <div class="card" id="summary-card"></div>
+    <div class="card">
+      <h2>当日建议</h2>
+      <div id="advice-box"></div>
+    </div>
+    <div class="card">
+      <h2>饮食记录</h2>
+      <div id="meals-box"></div>
+    </div>
+  </section>
+
+  <section id="view-trends" hidden>
+    <div class="range-row" id="range-row">
+      <button data-days="7">近7天</button>
+      <button data-days="30" class="active">近30天</button>
+      <button data-days="90">近90天</button>
+    </div>
+    <div class="card">
+      <h2>每日摄入 (kcal)</h2>
+      <div class="chart" id="chart-kcal"></div>
+    </div>
+    <div class="card">
+      <h2>三大营养素 (g)</h2>
+      <div class="chart" id="chart-macros"></div>
+      <div class="legend" id="legend-macros"></div>
+    </div>
+    <div class="card">
+      <h2>体重 (kg)</h2>
+      <div class="chart" id="chart-weight"></div>
+      <div class="weight-add">
+        <input type="number" step="0.1" min="20" max="300" id="weight-input" placeholder="今日体重 (kg)">
+        <button class="primary" id="weight-save">记录</button>
+      </div>
+      <div class="weight-list" id="weight-list"></div>
+    </div>
+  </section>
+
+  <section id="view-settings" hidden>
+    <div class="card settings-form">
+      <h2>设置</h2>
+      <label>每日卡路里目标 (kcal)</label>
+      <input type="number" id="set-target" min="500" max="10000" step="50">
+      <label>我的目标(会注入每次 AI 估算和建议,如:减脂,保持每天 120g 蛋白质)</label>
+      <textarea id="set-goal" rows="3"></textarea>
+      <label>每日建议生成时间</label>
+      <input type="time" id="set-advice-time">
+      <label>餐次时间划分(其余时间算加餐)</label>
+      <div id="slot-rows"></div>
+      <label>模型</label>
+      <input type="text" id="set-model">
+      <div style="margin-top:16px">
+        <button class="primary" id="settings-save">保存</button>
+        <span class="save-note" id="settings-note"></span>
+      </div>
+    </div>
+  </section>
+</main>
+<div id="tooltip"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
