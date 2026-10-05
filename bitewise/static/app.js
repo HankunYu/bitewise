@@ -6,12 +6,25 @@ const tooltip = $("#tooltip");
 const SLOT_NAMES = { breakfast: "早餐", lunch: "午餐", dinner: "晚餐", snack: "加餐" };
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
+// Tracked nutrients; dir "min" = daily floor to reach, "max" = daily cap to stay under.
+const NUTRIENTS = [
+  { key: "protein_g", name: "蛋白质", unit: "g", dir: "min" },
+  { key: "carbs_g", name: "碳水", unit: "g", dir: "max" },
+  { key: "fat_g", name: "脂肪", unit: "g", dir: "max" },
+  { key: "fiber_g", name: "膳食纤维", unit: "g", dir: "min" },
+  { key: "sugar_g", name: "糖", unit: "g", dir: "max" },
+  { key: "sodium_mg", name: "钠", unit: "mg", dir: "max" },
+];
+const NUMERIC_MEAL_FIELDS = ["kcal", ...NUTRIENTS.map((n) => n.key)];
+
 const state = {
   view: "today",
   date: todayStr(),
   rangeDays: 30,
   pollTimer: null,
   trendData: null,
+  calMonth: todayStr().slice(0, 7),
+  calSelected: null,
 };
 
 function todayStr() {
@@ -51,10 +64,11 @@ function switchView(view) {
   state.view = view;
   document.querySelectorAll("nav button").forEach((b) =>
     b.classList.toggle("active", b.dataset.view === view));
-  ["today", "trends", "settings"].forEach((v) => {
+  ["today", "calendar", "trends", "settings"].forEach((v) => {
     $(`#view-${v}`).hidden = v !== view;
   });
   if (view === "today") loadDay();
+  if (view === "calendar") loadCalendar();
   if (view === "trends") loadTrends();
   if (view === "settings") loadSettings();
 }
@@ -89,9 +103,20 @@ async function loadDay() {
   renderMeals(data);
   const busy = data.meals.some((m) => m.status === "pending" || m.status === "processing")
     || adviceBusy(data.advice);
-  if (busy && state.view === "today") {
-    state.pollTimer = setTimeout(loadDay, 8000);
+  // Fast poll while jobs run; slow poll otherwise so records added from other
+  // entry points (shortcut, Telegram bot) show up without a manual refresh.
+  if (state.view === "today") {
+    state.pollTimer = setTimeout(pollDay, busy ? 8000 : 30000);
   }
+}
+
+function pollDay() {
+  // Reloading rebuilds the meal list; don't clobber an open edit form.
+  if ($(".edit-form")) {
+    state.pollTimer = setTimeout(pollDay, 8000);
+    return;
+  }
+  loadDay();
 }
 
 function renderSummary(data) {
@@ -110,14 +135,39 @@ function renderSummary(data) {
     </div>
     <div class="progress"><div style="width:${pct}%"></div></div>
     ${weightHtml}
-    <div class="tiles">
-      <div class="tile"><div class="label"><span class="dot" style="background:var(--series-1)"></span>蛋白质</div>
-        <div class="value">${round1(data.totals.protein_g)}<small> g</small></div></div>
-      <div class="tile"><div class="label"><span class="dot" style="background:var(--series-2)"></span>碳水</div>
-        <div class="value">${round1(data.totals.carbs_g)}<small> g</small></div></div>
-      <div class="tile"><div class="label"><span class="dot" style="background:var(--series-3)"></span>脂肪</div>
-        <div class="value">${round1(data.totals.fat_g)}<small> g</small></div></div>
+    <div class="nutrients">${NUTRIENTS.map((n) => nutrientRow(n, data)).join("")}</div>`;
+}
+
+function nutrientStatus(dir, ratio) {
+  if (dir === "min") {
+    if (ratio >= 1) return { label: "达标", cls: "ok" };
+    if (ratio >= 0.7) return { label: "快够了", cls: "near" };
+    return { label: "还不够", cls: "low" };
+  }
+  if (ratio > 1) return { label: "超出", cls: "over" };
+  if (ratio >= 0.8) return { label: "接近上限", cls: "near" };
+  return { label: "正常", cls: "ok" };
+}
+
+function nutrientRow(n, data) {
+  const value = data.totals[n.key] || 0;
+  const shown = n.key === "sodium_mg" ? Math.round(value) : round1(value);
+  const target = Number(data.nutrient_targets[n.key]) || 0;
+  if (!target) {
+    return `<div class="nutrient">
+      <span class="n-name">${n.name}</span>
+      <span class="n-value">${shown}<small> ${n.unit}</small></span>
+      <span class="n-status none">未设目标</span>
     </div>`;
+  }
+  const st = nutrientStatus(n.dir, value / target);
+  const pct = Math.min(100, (value / target) * 100);
+  return `<div class="nutrient">
+    <span class="n-name">${n.name}</span>
+    <span class="n-value">${shown}<small> / ${n.dir === "min" ? "≥" : "≤"} ${target} ${n.unit}</small></span>
+    <span class="n-status ${st.cls}">${st.label}</span>
+    <div class="n-bar"><div class="${st.cls}" style="width:${pct}%"></div></div>
+  </div>`;
 }
 
 function adviceBusy(advice) {
@@ -177,16 +227,19 @@ function mealNode(meal) {
   const slot = SLOT_NAMES[meal.meal_slot] || meal.meal_slot;
 
   if (meal.status !== "done") {
+    // A non-null kcal means this meal was estimated before: it's a recalculation.
+    const isRecalc = meal.kcal != null;
     const statusText = meal.status === "failed"
-      ? `识别失败:${escapeHtml(meal.error || "未知错误")}`
-      : "识别中…";
+      ? `${isRecalc ? "重算失败" : "识别失败"}:${escapeHtml(meal.error || "未知错误")}`
+      : isRecalc ? "重新计算中…" : "识别中…";
+    const desc = meal.description || meal.source_text;
     div.innerHTML = `
       <div class="meal-head">
         <span class="slot-badge">${slot}</span>
         <span class="meal-time">${time}</span>
         <span class="meal-status ${meal.status}">${statusText}</span>
       </div>
-      ${meal.source_text ? `<div class="meal-desc">${escapeHtml(meal.source_text)}</div>` : ""}
+      ${desc ? `<div class="meal-desc">${escapeHtml(desc)}</div>` : ""}
       <div class="meal-actions">
         ${meal.status === "failed" ? `<button data-act="retry">重试</button>` : ""}
         <button data-act="delete" class="danger">删除</button>
@@ -195,6 +248,14 @@ function mealNode(meal) {
     const items = (meal.items || [])
       .map((it) => `${it.name}${it.amount ? ` ${it.amount}` : ""} ~${Math.round(it.kcal)}kcal`)
       .join("、");
+    const macros = [
+      `蛋白 ${round1(meal.protein_g)}g`,
+      `碳水 ${round1(meal.carbs_g)}g`,
+      `脂肪 ${round1(meal.fat_g)}g`,
+    ];
+    if (meal.fiber_g != null) macros.push(`纤维 ${round1(meal.fiber_g)}g`);
+    if (meal.sugar_g != null) macros.push(`糖 ${round1(meal.sugar_g)}g`);
+    if (meal.sodium_mg != null) macros.push(`钠 ${Math.round(meal.sodium_mg)}mg`);
     div.innerHTML = `
       <div class="meal-head">
         <span class="slot-badge">${slot}</span>
@@ -202,7 +263,7 @@ function mealNode(meal) {
         <span class="meal-kcal">${Math.round(meal.kcal)} kcal</span>
       </div>
       <div class="meal-desc">${escapeHtml(meal.description)}</div>
-      <div class="meal-macros">蛋白 ${round1(meal.protein_g)}g · 碳水 ${round1(meal.carbs_g)}g · 脂肪 ${round1(meal.fat_g)}g</div>
+      <div class="meal-macros">${macros.join(" · ")}</div>
       ${items ? `<div class="meal-items">${escapeHtml(items)}</div>` : ""}
       ${meal.comment ? `<div class="meal-comment">💬 ${escapeHtml(meal.comment)}</div>` : ""}
       <div class="meal-actions">
@@ -240,18 +301,36 @@ function showEditForm(container, meal) {
       ${Object.entries(SLOT_NAMES).map(([k, v]) =>
         `<option value="${k}" ${k === meal.meal_slot ? "selected" : ""}>${v}</option>`).join("")}
     </select></div>
-    <div><label>蛋白质 (g)</label><input name="protein_g" type="number" step="0.1" value="${meal.protein_g ?? 0}"></div>
-    <div><label>碳水 (g)</label><input name="carbs_g" type="number" step="0.1" value="${meal.carbs_g ?? 0}"></div>
-    <div><label>脂肪 (g)</label><input name="fat_g" type="number" step="0.1" value="${meal.fat_g ?? 0}"></div>
+    ${NUTRIENTS.map((n) => `<div><label>${n.name} (${n.unit})</label>
+      <input name="${n.key}" type="number" step="${n.key === "sodium_mg" ? 1 : 0.1}" value="${meal[n.key] ?? 0}"></div>`).join("")}
     <div><label>时间</label><input name="eaten_at" type="datetime-local" value="${meal.eaten_at.slice(0, 16)}"></div>
     <div class="full"><label>点评</label><input name="comment" value="${escapeAttr(meal.comment)}"></div>
-    <div class="full"><button class="primary" data-save="1">保存</button></div>`;
+    <div class="full">
+      <button class="primary" data-save="1">保存</button>
+      <button class="ghost" data-recalc="1" title="按更正后的描述让 AI 重新估算营养">重新计算</button>
+    </div>`;
   form.addEventListener("click", async (ev) => {
+    if (ev.target.dataset.recalc) {
+      // Persist the fields recalculation won't recompute, then re-estimate.
+      const kept = {
+        description: $('input[name="description"]', form).value,
+        eaten_at: $('input[name="eaten_at"]', form).value,
+        meal_slot: $('select[name="meal_slot"]', form).value,
+      };
+      try {
+        await apiJSON(`/api/meals/${meal.id}`, "PATCH", kept);
+        await api(`/api/meals/${meal.id}/recalc`, { method: "POST" });
+        loadDay();
+      } catch (err) {
+        alert(`重新计算失败:${err.message}`);
+      }
+      return;
+    }
     if (!ev.target.dataset.save) return;
     const fields = {};
     form.querySelectorAll("input, select").forEach((input) => {
       let value = input.value;
-      if (["kcal", "protein_g", "carbs_g", "fat_g"].includes(input.name)) value = Number(value);
+      if (NUMERIC_MEAL_FIELDS.includes(input.name)) value = Number(value);
       fields[input.name] = value;
     });
     try {
@@ -263,6 +342,142 @@ function showEditForm(container, meal) {
   });
   container.appendChild(form);
 }
+
+// ---------------- calendar view ----------------
+
+$("#cal-prev").addEventListener("click", () => shiftMonth(-1));
+$("#cal-next").addEventListener("click", () => shiftMonth(1));
+
+function shiftMonth(delta) {
+  const d = new Date(state.calMonth + "-15T12:00:00");
+  d.setMonth(d.getMonth() + delta);
+  state.calMonth = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  state.calSelected = null;
+  loadCalendar();
+}
+
+async function loadCalendar() {
+  let data;
+  try {
+    data = await api(`/api/calendar/${state.calMonth}`);
+  } catch (err) {
+    $("#cal-grid").textContent = `加载失败:${err.message}`;
+    return;
+  }
+  $("#cal-label").textContent = `${state.calMonth.slice(0, 4)} 年 ${Number(state.calMonth.slice(5))} 月`;
+  renderCalGrid(data);
+  if (state.calSelected) {
+    loadCalDetail(state.calSelected);
+  } else {
+    $("#cal-detail").innerHTML = `<div class="card advice-empty">点一天查看吃了什么</div>`;
+  }
+}
+
+function renderCalGrid(data) {
+  const byDate = {};
+  data.days.forEach((d) => { byDate[d.date] = d; });
+  const first = new Date(state.calMonth + "-01T12:00:00");
+  const daysInMonth = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+  const lead = (first.getDay() + 6) % 7; // Monday-first offset
+  const today = todayStr();
+
+  let html = ["一", "二", "三", "四", "五", "六", "日"]
+    .map((w) => `<div class="cal-head">${w}</div>`).join("");
+  html += `<div class="cal-pad"></div>`.repeat(lead);
+  for (let day = 1; day <= daysInMonth; day++) {
+    const dateStr = `${state.calMonth}-${String(day).padStart(2, "0")}`;
+    const rec = byDate[dateStr];
+    const cls = [
+      "cal-cell",
+      rec ? (rec.kcal > data.target ? "over" : "ok") : "empty",
+      dateStr === today ? "today" : "",
+      dateStr === state.calSelected ? "selected" : "",
+      dateStr > today ? "future" : "",
+    ].filter(Boolean).join(" ");
+    html += `<div class="${cls}" data-date="${dateStr}">
+      <span class="cal-day">${day}</span>
+      ${rec ? `<span class="cal-kcal">${Math.round(rec.kcal)}</span>` : ""}
+    </div>`;
+  }
+  const grid = $("#cal-grid");
+  grid.innerHTML = html;
+  grid.querySelectorAll(".cal-cell").forEach((cell) => {
+    cell.addEventListener("click", () => {
+      state.calSelected = cell.dataset.date;
+      grid.querySelectorAll(".cal-cell").forEach((c) =>
+        c.classList.toggle("selected", c === cell));
+      loadCalDetail(cell.dataset.date);
+    });
+  });
+}
+
+async function loadCalDetail(dateStr) {
+  const box = $("#cal-detail");
+  let data;
+  try {
+    data = await api(`/api/day/${dateStr}`);
+  } catch (err) {
+    box.innerHTML = `<div class="card advice-empty">加载失败:${escapeHtml(err.message)}</div>`;
+    return;
+  }
+  const d = new Date(dateStr + "T12:00:00");
+  const done = data.meals.filter((m) => m.status === "done");
+  if (!done.length) {
+    box.innerHTML = `<div class="card advice-empty">${dateStr} 没有记录</div>`;
+    return;
+  }
+  const meals = done.map((m) => `
+    <div class="cal-meal">
+      ${m.image_path ? `<img class="cal-thumb" src="/${m.image_path}" loading="lazy" alt="" data-full="/${m.image_path}">` : `<div class="cal-thumb none">📝</div>`}
+      <div class="cal-meal-body">
+        <div class="meal-head">
+          <span class="slot-badge">${SLOT_NAMES[m.meal_slot] || m.meal_slot}</span>
+          <span class="meal-time">${m.eaten_at.slice(11, 16)}</span>
+          <span class="meal-kcal">${Math.round(m.kcal)} kcal</span>
+        </div>
+        <div class="meal-desc">${escapeHtml(m.description)}</div>
+        ${m.comment ? `<div class="meal-comment">💬 ${escapeHtml(m.comment)}</div>` : ""}
+      </div>
+    </div>`).join("");
+  const advice = data.advice && data.advice.text
+    ? `<div class="cal-advice"><h2>当日建议</h2><div class="advice-text">${escapeHtml(data.advice.text)}</div></div>`
+    : "";
+  box.innerHTML = `
+    <div class="card">
+      <h2>${dateStr} ${WEEKDAYS[d.getDay()]} · ${Math.round(data.totals.kcal)} / ${data.target} kcal</h2>
+      ${meals}
+      ${advice}
+    </div>`;
+  box.querySelectorAll(".cal-thumb[data-full]").forEach((img) =>
+    img.addEventListener("click", () => openLightbox(img.dataset.full)));
+}
+
+// ---------------- lightbox ----------------
+
+const lightbox = $("#lightbox");
+let lightboxHideTimer = null;
+
+function openLightbox(src) {
+  clearTimeout(lightboxHideTimer);
+  $("img", lightbox).src = src;
+  lightbox.hidden = false;
+  document.body.style.overflow = "hidden";
+  requestAnimationFrame(() => lightbox.classList.add("show"));
+}
+
+function closeLightbox() {
+  lightbox.classList.remove("show");
+  document.body.style.overflow = "";
+  lightboxHideTimer = setTimeout(() => {
+    lightbox.hidden = true;
+    $("img", lightbox).src = "";
+  }, 200);
+}
+
+lightbox.addEventListener("click", closeLightbox);
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && !lightbox.hidden) closeLightbox();
+});
 
 // ---------------- trends view ----------------
 
@@ -655,7 +870,70 @@ async function loadSettings() {
       <input type="time" data-k="end" value="${end}">
     </div>`;
   }).join("");
+  renderNutrientInputs(s.nutrient_targets);
+  const job = targetsJob(s);
+  if (job.status === "pending" || job.status === "processing") {
+    setTargetsBusy(true);
+    pollTargetsJob();
+  }
 }
+
+function renderNutrientInputs(targetsJson) {
+  let targets = {};
+  try { targets = JSON.parse(targetsJson); } catch (e) { /* ignore */ }
+  $("#nutrient-rows").innerHTML = NUTRIENTS.map((n) => `
+    <div>
+      <label>${n.name} ${n.dir === "min" ? "≥" : "≤"} (${n.unit})</label>
+      <input type="number" min="0" step="${n.key === "sodium_mg" ? 50 : 1}"
+        data-nutrient="${n.key}" value="${targets[n.key] ?? ""}">
+    </div>`).join("");
+}
+
+function targetsJob(s) {
+  try { return JSON.parse(s.nutrient_targets_job); } catch (e) { return { status: "idle" }; }
+}
+
+function setTargetsBusy(busy) {
+  $("#targets-generate").disabled = busy;
+  const note = $("#targets-note");
+  note.classList.remove("error");
+  note.textContent = busy ? "生成中…" : "";
+}
+
+let targetsTimer = null;
+
+function pollTargetsJob() {
+  clearTimeout(targetsTimer);
+  targetsTimer = setTimeout(async () => {
+    if (state.view !== "settings") return;
+    let s;
+    try { s = await api("/api/settings"); } catch (e) { pollTargetsJob(); return; }
+    const job = targetsJob(s);
+    if (job.status === "pending" || job.status === "processing") { pollTargetsJob(); return; }
+    setTargetsBusy(false);
+    const note = $("#targets-note");
+    if (job.status === "failed") {
+      note.classList.add("error");
+      note.textContent = `生成失败:${job.error || "未知错误"}`;
+    } else {
+      renderNutrientInputs(s.nutrient_targets);
+      note.textContent = "已生成,可微调后保存 ✓";
+    }
+  }, 3000);
+}
+
+$("#targets-generate").addEventListener("click", async () => {
+  try {
+    await api("/api/nutrient-targets/generate", { method: "POST" });
+  } catch (err) {
+    const note = $("#targets-note");
+    note.classList.add("error");
+    note.textContent = `生成失败:${err.message}`;
+    return;
+  }
+  setTargetsBusy(true);
+  pollTargetsJob();
+});
 
 $("#settings-save").addEventListener("click", async () => {
   const slots = {};
@@ -665,6 +943,11 @@ $("#settings-save").addEventListener("click", async () => {
       $('input[data-k="end"]', row).value,
     ];
   });
+  const targets = {};
+  document.querySelectorAll("#nutrient-rows input").forEach((input) => {
+    const v = Number(input.value);
+    if (input.value.trim() !== "" && v > 0) targets[input.dataset.nutrient] = v;
+  });
   const note = $("#settings-note");
   try {
     await apiJSON("/api/settings", "PUT", {
@@ -673,6 +956,7 @@ $("#settings-save").addEventListener("click", async () => {
       advice_time: $("#set-advice-time").value,
       model: $("#set-model").value,
       meal_slots: slots,
+      nutrient_targets: targets,
     });
     note.textContent = "已保存 ✓";
     setTimeout(() => { note.textContent = ""; }, 2000);
@@ -709,6 +993,14 @@ window.addEventListener("resize", () => {
 });
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
   if (state.view === "trends") renderTrendCharts();
+});
+
+// Refresh immediately when the page returns to the foreground (e.g. after
+// logging a meal from the shortcut or Telegram and switching back).
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && state.view === "today" && !$(".edit-form")) {
+    loadDay();
+  }
 });
 
 // boot

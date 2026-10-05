@@ -1,3 +1,4 @@
+import json
 import logging
 import queue
 import threading
@@ -7,7 +8,7 @@ from . import ai, db
 
 logger = logging.getLogger("bitewise.worker")
 
-# Jobs are (kind, key): ("meal", meal_id) or ("advice", date).
+# Jobs are (kind, key): ("meal", meal_id), ("advice", date) or ("targets", "").
 _queue: queue.Queue[tuple[str, int | str]] = queue.Queue()
 
 
@@ -19,12 +20,18 @@ def enqueue_advice(date: str) -> None:
     _queue.put(("advice", date))
 
 
+def enqueue_targets() -> None:
+    _queue.put(("targets", ""))
+
+
 def start() -> None:
     # Requeue anything left unfinished by a previous run.
     for meal_id in db.unfinished_meal_ids():
         _queue.put(("meal", meal_id))
     for advice_date in db.unfinished_advice_dates():
         _queue.put(("advice", advice_date))
+    if db.get_targets_job()["status"] in ("pending", "processing"):
+        _queue.put(("targets", ""))
     threading.Thread(target=_run, daemon=True, name="bitewise-worker").start()
 
 
@@ -34,8 +41,10 @@ def _run() -> None:
         try:
             if kind == "meal":
                 _process_meal(key)
-            else:
+            elif kind == "advice":
                 _process_advice(key)
+            else:
+                _process_targets()
         except ai.AIError as exc:
             logger.warning("%s %s failed: %s", kind, key, exc)
             _mark_failed(kind, key, str(exc))
@@ -47,8 +56,18 @@ def _run() -> None:
 def _mark_failed(kind: str, key: int | str, error: str) -> None:
     if kind == "meal":
         db.update_meal(key, {"status": "failed", "error": error})
-    else:
+    elif kind == "advice":
         db.update_advice(key, {"status": "failed", "error": error})
+    else:
+        db.set_targets_job("failed", error)
+
+
+def _process_targets() -> None:
+    db.set_targets_job("processing")
+    targets = ai.nutrient_targets()
+    db.set_settings({"nutrient_targets": json.dumps(targets, ensure_ascii=False)})
+    db.set_targets_job("done")
+    logger.info("nutrient targets generated: %s", targets)
 
 
 def _process_advice(date: str) -> None:
@@ -65,6 +84,16 @@ def _process_meal(meal_id: int) -> None:
     if meal is None or meal["status"] == "done":
         return
     db.update_meal(meal_id, {"status": "processing", "error": None})
+
+    # kcal is only ever set together with status='done', so a non-null kcal means
+    # this meal was estimated before: it is a user-triggered recalculation.
+    if meal["kcal"] is not None:
+        estimate = ai.estimate_meal(
+            meal["image_path"], meal["source_text"], correction=meal["description"]
+        )
+        db.update_meal(meal_id, {**estimate, "status": "done"})
+        logger.info("meal %s recalculated: %s (%s kcal)", meal_id, estimate["description"], estimate["kcal"])
+        return
 
     if meal["image_path"]:
         estimate = ai.estimate_meal(meal["image_path"], meal["source_text"])

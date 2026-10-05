@@ -1,3 +1,4 @@
+import io
 import json
 import logging
 import re
@@ -7,6 +8,7 @@ from datetime import date, datetime, timedelta
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from PIL import Image, ImageOps
 
 from . import config, db, scheduler, worker
 
@@ -15,6 +17,21 @@ logger = logging.getLogger("bitewise")
 WEIGHT_PATTERN = re.compile(
     r"^\s*体重\s*[::]?\s*(\d{2,3}(?:\.\d+)?)\s*(kg|公斤|斤)?\s*$", re.IGNORECASE
 )
+
+MAX_IMAGE_EDGE = 1600
+JPEG_QUALITY = 82
+
+
+def compress_image(raw: bytes) -> bytes:
+    """Re-encode an upload as an upright, bounded-size JPEG."""
+    img = Image.open(io.BytesIO(raw))
+    img = ImageOps.exif_transpose(img)
+    img.thumbnail((MAX_IMAGE_EDGE, MAX_IMAGE_EDGE))
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=JPEG_QUALITY, optimize=True)
+    return buf.getvalue()
 
 
 @asynccontextmanager
@@ -28,6 +45,16 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="bitewise", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def no_heuristic_cache(request, call_next):
+    # Static responses carry ETags but no Cache-Control; without it browsers
+    # cache heuristically and keep running stale frontend code after a deploy.
+    # no-cache = store, but revalidate every time (304 when unchanged).
+    response = await call_next(request)
+    response.headers.setdefault("Cache-Control", "no-cache")
+    return response
 
 
 def _parse_date(value: str) -> str:
@@ -57,10 +84,16 @@ async def upload(image: UploadFile | None = File(None), text: str = Form("")):
 
     image_path = None
     if image is not None:
-        suffix = (image.filename or "").rsplit(".", 1)
-        ext = suffix[1].lower() if len(suffix) == 2 and len(suffix[1]) <= 5 else "jpg"
+        raw = await image.read()
+        try:
+            data, ext = compress_image(raw), "jpeg"
+        except Exception:
+            # Unparseable format (e.g. HEIC): store as received rather than reject.
+            logger.warning("cannot compress upload %r, storing original", image.filename)
+            suffix = (image.filename or "").rsplit(".", 1)
+            data, ext = raw, (suffix[1].lower() if len(suffix) == 2 and len(suffix[1]) <= 5 else "jpg")
         name = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.{ext}"
-        (config.UPLOAD_DIR / name).write_bytes(await image.read())
+        (config.UPLOAD_DIR / name).write_bytes(data)
         image_path = f"uploads/{name}"
 
     meal_id = db.insert_meal(db.now_iso(), text, image_path)
@@ -77,7 +110,7 @@ def get_day(day: str):
     done = [m for m in meals if m["status"] == "done"]
     totals = {
         key: round(sum(m[key] or 0 for m in done), 1)
-        for key in ("kcal", "protein_g", "carbs_g", "fat_g")
+        for key in ("kcal", *config.NUTRIENT_KEYS)
     }
     weights = db.list_weights(day)
     weight = next((w["weight_kg"] for w in reversed(weights) if w["measured_at"][:10] == day), None)
@@ -87,6 +120,7 @@ def get_day(day: str):
         "meals": meals,
         "totals": totals,
         "target": int(db.get_setting("daily_kcal_target")),
+        "nutrient_targets": db.get_nutrient_targets(),
         "advice": {
             "text": advice["advice"] or None,
             "status": advice["status"],
@@ -104,7 +138,7 @@ def patch_meal(meal_id: int, fields: dict):
     for key, value in fields.items():
         if key not in db.MEAL_EDITABLE_FIELDS:
             raise HTTPException(400, f"field not editable: {key}")
-        if key in ("kcal", "protein_g", "carbs_g", "fat_g"):
+        if key in ("kcal", *config.NUTRIENT_KEYS):
             try:
                 clean[key] = round(float(value), 1)
             except (TypeError, ValueError):
@@ -143,6 +177,36 @@ def retry_meal(meal_id: int):
     db.update_meal(meal_id, {"status": "pending", "error": None})
     worker.enqueue_meal(meal_id)
     return {"id": meal_id, "status": "pending"}
+
+
+@app.post("/api/meals/{meal_id}/recalc")
+def recalc_meal(meal_id: int):
+    """Re-estimate a finished meal, taking its current description as the truth."""
+    meal = db.get_meal(meal_id)
+    if meal is None:
+        raise HTTPException(404, "meal not found")
+    if meal["status"] != "done":
+        raise HTTPException(400, f"meal is {meal['status']}, only finished meals can be recalculated")
+    db.update_meal(meal_id, {"status": "pending", "error": None})
+    worker.enqueue_meal(meal_id)
+    return {"id": meal_id, "status": "pending"}
+
+
+# ---------- calendar ----------
+
+@app.get("/api/calendar/{ym}")
+def calendar_month(ym: str):
+    try:
+        first = date.fromisoformat(f"{ym}-01")
+    except ValueError:
+        raise HTTPException(400, f"invalid month: {ym}")
+    next_month = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+    last = next_month - timedelta(days=1)
+    return {
+        "month": ym,
+        "days": db.daily_totals(first.isoformat(), last.isoformat()),
+        "target": int(db.get_setting("daily_kcal_target")),
+    }
 
 
 # ---------- trends ----------
@@ -225,13 +289,34 @@ def put_settings(values: dict):
             values["meal_slots"] = json.dumps(slots, ensure_ascii=False)
         except (ValueError, AttributeError, AssertionError):
             raise HTTPException(400, "meal_slots must be {name: [start, end]} JSON")
+    if "nutrient_targets" in values:
+        try:
+            targets = values["nutrient_targets"]
+            targets = json.loads(targets) if isinstance(targets, str) else targets
+            assert set(targets) <= set(config.NUTRIENT_KEYS)
+            values["nutrient_targets"] = json.dumps(
+                {k: round(float(v), 1) for k, v in targets.items()}, ensure_ascii=False)
+        except (ValueError, TypeError, AttributeError, AssertionError):
+            raise HTTPException(400, "nutrient_targets must be {nutrient: number} JSON")
     db.set_settings(values)
     return db.get_all_settings()
+
+
+@app.post("/api/nutrient-targets/generate")
+def generate_nutrient_targets():
+    job = db.get_targets_job()
+    if job["status"] in ("pending", "processing"):
+        return {"status": job["status"]}
+    db.set_targets_job("pending")
+    worker.enqueue_targets()
+    return {"status": "pending"}
 
 
 # ---------- frontend ----------
 
 app.mount("/static", StaticFiles(directory=config.STATIC_DIR), name="static")
+# Meal photos; check_dir=False because the data dir is created at startup, after import.
+app.mount("/uploads", StaticFiles(directory=config.UPLOAD_DIR, check_dir=False), name="uploads")
 
 
 @app.get("/")

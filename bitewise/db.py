@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS meals (
     protein_g REAL,
     carbs_g REAL,
     fat_g REAL,
+    fiber_g REAL,
+    sugar_g REAL,
+    sodium_mg REAL,
     comment TEXT NOT NULL DEFAULT '',
     source_text TEXT NOT NULL DEFAULT '',
     image_path TEXT,
@@ -49,7 +52,7 @@ CREATE TABLE IF NOT EXISTS settings (
 
 MEAL_EDITABLE_FIELDS = {
     "eaten_at", "meal_slot", "description", "items",
-    "kcal", "protein_g", "carbs_g", "fat_g", "comment",
+    "kcal", *config.NUTRIENT_KEYS, "comment",
 }
 
 
@@ -87,6 +90,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE daily_advice ADD COLUMN status TEXT NOT NULL DEFAULT 'done'")
     if "error" not in advice_cols:
         conn.execute("ALTER TABLE daily_advice ADD COLUMN error TEXT")
+    meal_cols = {r["name"] for r in conn.execute("PRAGMA table_info(meals)")}
+    for col in ("fiber_g", "sugar_g", "sodium_mg"):
+        if col not in meal_cols:
+            # NULL on old rows = "never estimated", distinct from an estimated 0.
+            conn.execute(f"ALTER TABLE meals ADD COLUMN {col} REAL")
 
 
 # ---------- settings ----------
@@ -116,6 +124,24 @@ def set_settings(values: dict) -> None:
                     "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                     (key, str(value)),
                 )
+
+
+def get_nutrient_targets() -> dict:
+    try:
+        return json.loads(get_setting("nutrient_targets"))
+    except (ValueError, TypeError):
+        return {}
+
+
+def get_targets_job() -> dict:
+    try:
+        return json.loads(get_setting("nutrient_targets_job"))
+    except (ValueError, TypeError):
+        return {"status": "idle", "error": None}
+
+
+def set_targets_job(status: str, error: str | None = None) -> None:
+    set_settings({"nutrient_targets_job": json.dumps({"status": status, "error": error}, ensure_ascii=False)})
 
 
 def slot_for(dt: datetime) -> str:
@@ -210,10 +236,10 @@ def unfinished_meal_ids() -> list[int]:
 
 def daily_totals(start_date: str, end_date: str) -> list[dict]:
     """Per-day sums of done meals for date(eaten_at) in [start_date, end_date]."""
+    sums = ", ".join(f"SUM({k}) AS {k}" for k in ("kcal", *config.NUTRIENT_KEYS))
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT date(eaten_at) AS date, SUM(kcal) AS kcal, SUM(protein_g) AS protein_g, "
-            "SUM(carbs_g) AS carbs_g, SUM(fat_g) AS fat_g "
+            f"SELECT date(eaten_at) AS date, {sums} "
             "FROM meals WHERE status = 'done' AND date(eaten_at) BETWEEN ? AND ? "
             "GROUP BY date(eaten_at) ORDER BY date(eaten_at)",
             (start_date, end_date),
@@ -239,6 +265,12 @@ def insert_weight(weight_kg: float, measured_at: str | None = None) -> int:
             (measured_at or now_iso(), weight_kg),
         )
         return cur.lastrowid
+
+
+def latest_weight() -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM weights ORDER BY measured_at DESC LIMIT 1").fetchone()
+    return dict(row) if row else None
 
 
 def list_weights(start_date: str) -> list[dict]:

@@ -10,6 +10,9 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8600
 
+# Per-meal nutrient columns the AI estimates; kcal is tracked separately.
+NUTRIENT_KEYS = ("protein_g", "carbs_g", "fat_g", "fiber_g", "sugar_g", "sodium_mg")
+
 # Settings stored in the DB; these are the defaults on first run.
 DEFAULT_SETTINGS = {
     "daily_kcal_target": "2000",
@@ -17,6 +20,9 @@ DEFAULT_SETTINGS = {
     "advice_time": "23:00",
     "model": "claude-opus-5",
     "meal_slots": '{"breakfast": ["05:00", "10:30"], "lunch": ["10:30", "15:00"], "dinner": ["17:00", "22:00"]}',
+    # Daily nutrient targets: {nutrient: number}. protein/fiber are floors, the rest are caps.
+    "nutrient_targets": "{}",
+    "nutrient_targets_job": '{"status": "idle", "error": null}',
 }
 
 

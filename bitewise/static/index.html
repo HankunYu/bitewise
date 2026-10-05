@@ -12,6 +12,7 @@
   <h1>🍜 bitewise</h1>
   <nav>
     <button data-view="today" class="active">今日</button>
+    <button data-view="calendar">日历</button>
     <button data-view="trends">趋势</button>
     <button data-view="settings">设置</button>
   </nav>
@@ -32,6 +33,18 @@
       <h2>饮食记录</h2>
       <div id="meals-box"></div>
     </div>
+  </section>
+
+  <section id="view-calendar" hidden>
+    <div class="date-nav">
+      <button id="cal-prev">‹</button>
+      <span class="current" id="cal-label"></span>
+      <button id="cal-next">›</button>
+    </div>
+    <div class="card">
+      <div class="cal-grid" id="cal-grid"></div>
+    </div>
+    <div id="cal-detail"></div>
   </section>
 
   <section id="view-trends" hidden>
@@ -67,6 +80,12 @@
       <input type="number" id="set-target" min="500" max="10000" step="50">
       <label>我的目标(会注入每次 AI 估算和建议,如:减脂,保持每天 120g 蛋白质)</label>
       <textarea id="set-goal" rows="3"></textarea>
+      <label>每日营养目标(≥ 为下限,≤ 为上限;留空则不追踪该项)</label>
+      <div class="nutrient-grid" id="nutrient-rows"></div>
+      <div class="targets-actions">
+        <button class="ghost" id="targets-generate">AI 生成目标</button>
+        <span class="save-note" id="targets-note"></span>
+      </div>
       <label>每日建议生成时间</label>
       <input type="time" id="set-advice-time">
       <label>餐次时间划分(其余时间算加餐)</label>
@@ -80,6 +99,7 @@
     </div>
   </section>
 </main>
+<div id="lightbox" hidden><img alt=""></div>
 <div id="tooltip"></div>
 <script src="/static/app.js"></script>
 </body>

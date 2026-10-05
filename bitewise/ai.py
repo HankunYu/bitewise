@@ -62,6 +62,9 @@ MEAL_JSON_SPEC = """{
   "protein_g": 蛋白质克数,
   "carbs_g": 碳水克数,
   "fat_g": 脂肪克数,
+  "fiber_g": 膳食纤维克数,
+  "sugar_g": 添加糖及游离糖克数,
+  "sodium_mg": 钠毫克数(注意酱料、腌制和外食的隐形钠),
   "comment": "结合用户目标的一句简短点评,不超过40字"
 }"""
 
@@ -71,13 +74,22 @@ def _goal_block() -> str:
     return f"用户的目标:{goal}\n" if goal else ""
 
 
-def estimate_meal(image_rel_path: str | None, text: str) -> dict:
-    """Estimate calories/macros for one meal from an image and/or text."""
+def estimate_meal(image_rel_path: str | None, text: str, correction: str = "") -> dict:
+    """Estimate calories/macros for one meal from an image and/or text.
+
+    correction: user-confirmed description of what the meal actually is;
+    when present it overrides whatever the image/text suggest.
+    """
     parts = ["你是一位营养师,请估算下面这顿饭的营养成分。"]
     if image_rel_path:
         parts.append(f"请先用 Read 工具读取图片 {image_rel_path} 查看这顿饭。")
     if text.strip():
         parts.append(f"用户的描述/补充说明:{text.strip()}")
+    if correction.strip():
+        parts.append(
+            f"注意:之前的识别有误,用户已更正,这顿饭实际是:「{correction.strip()}」。"
+            "请以更正内容为准重新估算,图片和原描述仅用于参考分量。"
+        )
     parts.append(_goal_block())
     parts.append(
         "按常见分量合理估算,不确定时取中间值。"
@@ -114,7 +126,7 @@ def interpret_text(text: str) -> dict:
 1. 记录一顿饭(作为营养师估算,不确定时取常见分量中间值):
 {{"action": "add_meal", "eaten_at": "可选,仅当用户明确提到时间(如\\"昨天晚上\\")时给出 ISO 格式,否则省略", "meal": {MEAL_JSON_SPEC}}}
 
-2. 修改已有记录(fields 只包含要改的字段,可用:kcal, protein_g, carbs_g, fat_g, description, comment, meal_slot, eaten_at):
+2. 修改已有记录(fields 只包含要改的字段,可用:kcal, protein_g, carbs_g, fat_g, fiber_g, sugar_g, sodium_mg, description, comment, meal_slot, eaten_at):
 {{"action": "update_meal", "id": 目标记录id, "fields": {{...}}}}
 
 3. 删除记录:
@@ -130,6 +142,42 @@ def interpret_text(text: str) -> dict:
     return action
 
 
+TARGETS_JSON_SPEC = """{
+  "protein_g": 每日蛋白质下限克数,
+  "carbs_g": 每日碳水上限克数,
+  "fat_g": 每日脂肪上限克数,
+  "fiber_g": 每日膳食纤维下限克数,
+  "sugar_g": 每日添加糖上限克数,
+  "sodium_mg": 每日钠上限毫克数
+}"""
+
+
+def nutrient_targets() -> dict:
+    """Generate daily nutrient targets from the user's goal, weight, and kcal target."""
+    weight = db.latest_weight()
+    parts = [
+        "你是一位营养师,请为用户制定每日营养摄入目标。",
+        _goal_block(),
+        f"每日卡路里目标:{db.get_setting('daily_kcal_target')} kcal",
+    ]
+    if weight:
+        parts.append(f"当前体重:{weight['weight_kg']} kg({weight['measured_at'][:10]} 记录)")
+    parts.append(
+        "蛋白质和膳食纤维是每日应达到的下限,碳水、脂肪、糖、钠是不应超过的上限。"
+        "按主流营养学共识估算(蛋白质按 g/kg 体重、纤维约 14g/1000kcal、糖和钠参考 WHO 建议),"
+        "并结合用户目标调整。"
+        f"只输出一个 JSON 对象,不要输出任何其他文字:\n{TARGETS_JSON_SPEC}"
+    )
+    data = _extract_json(_call_claude("\n".join(p for p in parts if p)))
+    targets = {}
+    for key in config.NUTRIENT_KEYS:
+        try:
+            targets[key] = round(float(data[key]), 1)
+        except (KeyError, TypeError, ValueError):
+            raise AIError(f"model returned bad target for {key}: {data.get(key)!r}")
+    return targets
+
+
 def daily_advice(date: str) -> str:
     """Generate the end-of-day advice paragraph for a date."""
     meals = [m for m in db.list_meals(f"{date}T00:00:00", f"{date}T23:59:59")
@@ -139,9 +187,7 @@ def daily_advice(date: str) -> str:
             "meal_slot": m["meal_slot"],
             "description": m["description"],
             "kcal": m["kcal"],
-            "protein_g": m["protein_g"],
-            "carbs_g": m["carbs_g"],
-            "fat_g": m["fat_g"],
+            **{key: m[key] for key in config.NUTRIENT_KEYS},
         }
         for m in meals
     ]
@@ -149,10 +195,15 @@ def daily_advice(date: str) -> str:
     week = db.daily_totals((day - timedelta(days=6)).isoformat(), date)
     weights = db.list_weights((day - timedelta(days=13)).isoformat())
     weights_brief = [{"date": w["measured_at"][:10], "kg": w["weight_kg"]} for w in weights]
+    targets = db.get_nutrient_targets()
+    targets_line = (
+        f"每日营养目标(蛋白质/纤维为下限,其余为上限,JSON):{json.dumps(targets, ensure_ascii=False)}\n"
+        if targets else ""
+    )
     prompt = f"""你是一位营养师。根据用户 {date} 的饮食记录,写一段当日总结建议。
 
 {_goal_block()}每日卡路里目标:{db.get_setting("daily_kcal_target")} kcal
-
+{targets_line}
 当日各餐(JSON):
 {json.dumps(meals_brief, ensure_ascii=False)}
 
@@ -192,8 +243,6 @@ def _normalize_meal(data: dict) -> dict:
         "description": str(data.get("description", "")).strip(),
         "items": clean_items,
         "kcal": num(data.get("kcal")),
-        "protein_g": num(data.get("protein_g")),
-        "carbs_g": num(data.get("carbs_g")),
-        "fat_g": num(data.get("fat_g")),
+        **{key: num(data.get(key)) for key in config.NUTRIENT_KEYS},
         "comment": str(data.get("comment", "")).strip(),
     }
