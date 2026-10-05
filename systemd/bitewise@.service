@@ -1,0 +1,17 @@
+[Unit]
+Description=bitewise meal tracker (%i)
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/GitHub/bitewise
+# Boot-time user services get a bare PATH; claude CLI lives in ~/.local/bin
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+# One instance per user: data lives in data/<instance>, port comes from the env file
+Environment=BITEWISE_DATA=%h/GitHub/bitewise/data/%i
+EnvironmentFile=%h/.config/bitewise/%i.env
+ExecStart=%h/GitHub/bitewise/.venv/bin/python -m bitewise --host 0.0.0.0 --port ${BITEWISE_PORT}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

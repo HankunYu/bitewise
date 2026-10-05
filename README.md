@@ -26,17 +26,23 @@ uv sync
 .venv/bin/python -m bitewise --host 0.0.0.0 --port 8600
 ```
 
-数据存在 `data/`(SQLite + 上传原图),已 gitignore。
+数据存在 `BITEWISE_DATA` 指向的目录(默认 `data/`,SQLite + 上传原图),已 gitignore。
 
-### systemd 常驻
+### systemd 常驻(每个用户一个实例)
+
+`systemd/bitewise@.service` 是模板单元,实例名即用户名:数据在 `data/<用户名>/`,端口读取 `~/.config/bitewise/<用户名>.env` 里的 `BITEWISE_PORT`。各实例的数据、设置、每晚建议互相独立。
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp systemd/bitewise.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now bitewise
-loginctl enable-linger "$USER"   # 开机免登录自启
+systemctl --user link "$PWD/systemd/bitewise@.service"   # 只需一次
+loginctl enable-linger "$USER"                            # 开机免登录自启
+
+# 新增用户:选一个未占用的端口
+mkdir -p ~/.config/bitewise
+echo "BITEWISE_PORT=8601" > ~/.config/bitewise/alice.env
+systemctl --user enable --now bitewise@alice
 ```
+
+该用户的快捷指令和 Dashboard 改用对应端口即可。
 
 ## 手机端
 
