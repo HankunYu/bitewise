@@ -33,8 +33,10 @@ cp .env.example .env   # 填入 ANTHROPIC_API_KEY
 
 `systemd/bitewise@.service` 是模板单元,实例名即用户名:数据在 `data/<用户名>/`,端口读取 `~/.config/bitewise/<用户名>.env` 里的 `BITEWISE_PORT`。各实例的数据、设置、每晚建议互相独立。
 
+单元里的仓库路径是占位符,由 `systemd/install.sh` 按仓库实际位置渲染后装到 `~/.config/systemd/user/`,仓库放在哪都行;移动仓库后重跑一次即可。
+
 ```bash
-systemctl --user link "$PWD/systemd/bitewise@.service"   # 只需一次
+./systemd/install.sh                                      # 首次及移动仓库后执行
 loginctl enable-linger "$USER"                            # 开机免登录自启
 
 # 新增用户:选一个未占用的端口
