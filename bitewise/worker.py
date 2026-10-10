@@ -2,67 +2,75 @@ import json
 import logging
 import queue
 import threading
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Callable
 
 from . import ai, db
 
 logger = logging.getLogger("bitewise.worker")
 
-# Jobs are (kind, key): ("meal", meal_id), ("advice", date) or ("targets", "").
-_queue: queue.Queue[tuple[str, int | str]] = queue.Queue()
+# Jobs are (kind, key), e.g. ("meal", meal_id), ("advice", date), ("targets", "")
+# or ("check", check_id). Each kind runs on a lane (one queue + one thread):
+# lanes run in parallel, jobs within a lane run in order.
+
+
+@dataclass(frozen=True)
+class _JobType:
+    process: Callable[[int | str], None]
+    fail: Callable[[int | str, str], None]
+    lane: str
 
 
 def enqueue_meal(meal_id: int) -> None:
-    _queue.put(("meal", meal_id))
+    _enqueue("meal", meal_id)
 
 
 def enqueue_advice(date: str) -> None:
-    _queue.put(("advice", date))
+    _enqueue("advice", date)
 
 
 def enqueue_targets() -> None:
-    _queue.put(("targets", ""))
+    _enqueue("targets", "")
+
+
+def enqueue_check(check_id: int) -> None:
+    _enqueue("check", check_id)
+
+
+def _enqueue(kind: str, key: int | str) -> None:
+    _lanes[_JOB_TYPES[kind].lane].put((kind, key))
 
 
 def start() -> None:
     # Requeue anything left unfinished by a previous run.
     for meal_id in db.unfinished_meal_ids():
-        _queue.put(("meal", meal_id))
+        enqueue_meal(meal_id)
     for advice_date in db.unfinished_advice_dates():
-        _queue.put(("advice", advice_date))
+        enqueue_advice(advice_date)
     if db.get_targets_job()["status"] in ("pending", "processing"):
-        _queue.put(("targets", ""))
-    threading.Thread(target=_run, daemon=True, name="bitewise-worker").start()
+        enqueue_targets()
+    for check_id in db.unfinished_check_ids():
+        enqueue_check(check_id)
+    for name, lane in _lanes.items():
+        threading.Thread(target=_run, args=(lane,), daemon=True, name=f"bitewise-worker-{name}").start()
 
 
-def _run() -> None:
+def _run(lane: queue.Queue) -> None:
     while True:
-        kind, key = _queue.get()
+        kind, key = lane.get()
+        job = _JOB_TYPES[kind]
         try:
-            if kind == "meal":
-                _process_meal(key)
-            elif kind == "advice":
-                _process_advice(key)
-            else:
-                _process_targets()
+            job.process(key)
         except ai.AIError as exc:
             logger.warning("%s %s failed: %s", kind, key, exc)
-            _mark_failed(kind, key, str(exc))
+            job.fail(key, str(exc))
         except Exception:
             logger.exception("%s %s crashed", kind, key)
-            _mark_failed(kind, key, "internal error, see logs")
+            job.fail(key, "internal error, see logs")
 
 
-def _mark_failed(kind: str, key: int | str, error: str) -> None:
-    if kind == "meal":
-        db.update_meal(key, {"status": "failed", "error": error})
-    elif kind == "advice":
-        db.update_advice(key, {"status": "failed", "error": error})
-    else:
-        db.set_targets_job("failed", error)
-
-
-def _process_targets() -> None:
+def _process_targets(_key: str) -> None:
     db.set_targets_job("processing")
     targets = ai.nutrient_targets()
     db.set_settings({"nutrient_targets": json.dumps(targets, ensure_ascii=False)})
@@ -148,3 +156,30 @@ def _process_meal(meal_id: int) -> None:
         logger.info("weight %.1f kg recorded via command", float(action["weight_kg"]))
     else:
         raise ai.AIError(f"unknown action from model: {kind!r}")
+
+
+def _process_check(check_id: int) -> None:
+    check = db.get_check(check_id)
+    if check is None or check["status"] == "done":
+        return
+    db.update_check(check_id, {"status": "processing", "error": None})
+    result = ai.check_food(check["image_path"])
+    db.update_check(check_id, {**result, "status": "done"})
+    logger.info("check %s done: %s (%s kcal)", check_id, result["verdict"], result["estimate"]["kcal"])
+
+
+# Meal, advice and targets share the main lane: advice and targets read what
+# meal jobs write. Checks are independent and interactive, so they get their own.
+_JOB_TYPES = {
+    "meal": _JobType(
+        _process_meal, lambda key, error: db.update_meal(key, {"status": "failed", "error": error}), "main"),
+    "advice": _JobType(
+        _process_advice, lambda key, error: db.update_advice(key, {"status": "failed", "error": error}), "main"),
+    "targets": _JobType(
+        _process_targets, lambda _key, error: db.set_targets_job("failed", error), "main"),
+    "check": _JobType(
+        _process_check, lambda key, error: db.update_check(key, {"status": "failed", "error": error}), "check"),
+}
+_lanes: dict[str, queue.Queue[tuple[str, int | str]]] = {
+    lane: queue.Queue() for lane in dict.fromkeys(job.lane for job in _JOB_TYPES.values())
+}

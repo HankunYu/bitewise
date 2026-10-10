@@ -44,6 +44,20 @@ CREATE TABLE IF NOT EXISTS daily_advice (
     generated_at TEXT NOT NULL
 );
 
+-- "Can I eat this?" photo checks; not counted as intake until turned into a meal.
+CREATE TABLE IF NOT EXISTS food_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    image_path TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    error TEXT,
+    verdict TEXT,
+    advice TEXT NOT NULL DEFAULT '',
+    estimate TEXT,
+    meal_id INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -331,3 +345,87 @@ def unfinished_advice_dates() -> list[str]:
             "SELECT date FROM daily_advice WHERE status IN ('pending', 'processing') ORDER BY date"
         ).fetchall()
     return [r["date"] for r in rows]
+
+
+# ---------- food checks ----------
+
+def _check_to_dict(row: sqlite3.Row) -> dict:
+    check = dict(row)
+    try:
+        check["estimate"] = json.loads(check["estimate"]) if check["estimate"] else None
+    except (ValueError, TypeError):
+        check["estimate"] = None
+    return check
+
+
+def insert_check(image_path: str) -> int:
+    now = now_iso()
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO food_checks (image_path, status, created_at, updated_at) "
+            "VALUES (?, 'pending', ?, ?)",
+            (image_path, now, now),
+        )
+        return cur.lastrowid
+
+
+def get_check(check_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM food_checks WHERE id = ?", (check_id,)).fetchone()
+    return _check_to_dict(row) if row else None
+
+
+def update_check(check_id: int, fields: dict) -> None:
+    fields = dict(fields)
+    if "estimate" in fields and not isinstance(fields["estimate"], str):
+        fields["estimate"] = json.dumps(fields["estimate"], ensure_ascii=False)
+    fields["updated_at"] = now_iso()
+    columns = ", ".join(f"{k} = ?" for k in fields)
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE food_checks SET {columns} WHERE id = ?",
+            (*fields.values(), check_id),
+        )
+
+
+def unfinished_check_ids() -> list[int]:
+    """Checks left pending/processing (e.g. after a restart)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id FROM food_checks WHERE status IN ('pending', 'processing') ORDER BY id"
+        ).fetchall()
+    return [r["id"] for r in rows]
+
+
+def eat_check(check_id: int) -> int | None:
+    """Record a finished check as a done meal eaten now.
+
+    Returns the new meal id, or None if the check was already eaten. Claiming
+    the check and inserting the meal share one transaction, so a double tap
+    cannot log the meal twice.
+    """
+    eaten_at = now_iso()
+    slot = slot_for(datetime.fromisoformat(eaten_at))
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT image_path, estimate, meal_id FROM food_checks WHERE id = ?", (check_id,)
+        ).fetchone()
+        if row is None or row["meal_id"] is not None:
+            return None
+        estimate = json.loads(row["estimate"])
+        columns = ("description", "kcal", *config.NUTRIENT_KEYS, "comment")
+        cur = conn.execute(
+            f"INSERT INTO meals (eaten_at, meal_slot, items, image_path, status, created_at, updated_at, "
+            f"{', '.join(columns)}) VALUES (?, ?, ?, ?, 'done', ?, ?, {', '.join('?' for _ in columns)})",
+            (
+                eaten_at, slot, json.dumps(estimate["items"], ensure_ascii=False),
+                row["image_path"], eaten_at, eaten_at,
+                *(estimate[k] for k in columns),
+            ),
+        )
+        conn.execute(
+            "UPDATE food_checks SET meal_id = ?, updated_at = ? WHERE id = ?",
+            (cur.lastrowid, eaten_at, check_id),
+        )
+        return cur.lastrowid

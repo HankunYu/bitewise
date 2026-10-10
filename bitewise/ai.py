@@ -152,6 +152,58 @@ def interpret_text(text: str) -> dict:
     return action
 
 
+CHECK_VERDICTS = ("ok", "moderate", "avoid")
+
+
+def check_food(image_rel_path: str) -> dict:
+    """Advise whether to eat the pictured food, given what was already eaten today.
+
+    Returns {"verdict", "advice", "estimate"}; estimate has the meal shape so an
+    eaten check can be stored as a meal without another model call.
+    """
+    today = datetime.now().date().isoformat()
+    meals = [m for m in db.list_meals(f"{today}T00:00:00", f"{today}T23:59:59")
+             if m["status"] == "done"]
+    meals_brief = [
+        {"meal_slot": m["meal_slot"], "description": m["description"], "kcal": m["kcal"]}
+        for m in meals
+    ]
+    totals = {
+        key: round(sum(m[key] or 0 for m in meals), 1)
+        for key in ("kcal", *config.NUTRIENT_KEYS)
+    }
+    targets = db.get_nutrient_targets()
+    targets_line = (
+        f"每日营养目标(蛋白质/纤维为下限,其余为上限,JSON):{json.dumps(targets, ensure_ascii=False)}\n"
+        if targets else ""
+    )
+    now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
+    prompt = f"""你是一位营养师。用户还没吃,拍了一张食物照片问你:这个能不能吃、吃了会怎样。
+
+请先用 Read 工具读取图片 {image_rel_path} 查看食物。
+
+当前时间:{now}
+{_goal_block()}每日卡路里目标:{db.get_setting("daily_kcal_target")} kcal
+{targets_line}今天已经吃的(JSON):{json.dumps(meals_brief, ensure_ascii=False)}
+今天已摄入合计(JSON):{json.dumps(totals, ensure_ascii=False)}
+
+估算这份食物的营养成分,结合今天剩余额度、当前时间和用户目标,给出建议。
+verdict 取值:ok(可以放心吃)、moderate(可以吃但要控制分量或搭配)、avoid(不建议吃)。
+只输出一个 JSON 对象,不要输出任何其他文字:
+{{"verdict": "ok / moderate / avoid", "advice": "具体建议,如吃多少、怎么搭配、吃了之后今天还剩多少额度,不超过80字", "meal": {MEAL_JSON_SPEC}}}"""
+    data = _extract_json(_call_claude(prompt))
+    verdict = data.get("verdict")
+    if verdict not in CHECK_VERDICTS:
+        raise AIError(f"model returned bad verdict: {verdict!r}")
+    if not isinstance(data.get("meal"), dict):
+        raise AIError("model returned no meal estimate")
+    return {
+        "verdict": verdict,
+        "advice": str(data.get("advice", "")).strip(),
+        "estimate": _normalize_meal(data["meal"]),
+    }
+
+
 TARGETS_JSON_SPEC = """{
   "protein_g": 每日蛋白质下限克数,
   "carbs_g": 每日碳水上限克数,

@@ -39,6 +39,24 @@ def compress_image(raw: bytes) -> bytes:
     return buf.getvalue()
 
 
+async def save_upload(image: UploadFile) -> str:
+    """Store an uploaded photo under the upload dir; returns its DATA_DIR-relative path."""
+    raw = await image.read()
+    try:
+        data, ext = compress_image(raw), "jpeg"
+    except Exception:
+        # Unparseable image format (e.g. HEIC): store as received rather than reject.
+        suffix = (image.filename or "").rsplit(".", 1)
+        ext = suffix[1].lower() if len(suffix) == 2 else ""
+        if ext not in RAW_IMAGE_EXTS:
+            raise HTTPException(400, f"unsupported image file: {image.filename!r}")
+        logger.warning("cannot compress upload %r, storing original", image.filename)
+        data = raw
+    name = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.{ext}"
+    (config.UPLOAD_DIR / name).write_bytes(data)
+    return f"uploads/{name}"
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -87,22 +105,7 @@ async def upload(image: UploadFile | None = File(None), text: str = Form("")):
             weight_id = db.insert_weight(kg)
             return {"type": "weight", "id": weight_id, "weight_kg": kg}
 
-    image_path = None
-    if image is not None:
-        raw = await image.read()
-        try:
-            data, ext = compress_image(raw), "jpeg"
-        except Exception:
-            # Unparseable image format (e.g. HEIC): store as received rather than reject.
-            suffix = (image.filename or "").rsplit(".", 1)
-            ext = suffix[1].lower() if len(suffix) == 2 else ""
-            if ext not in RAW_IMAGE_EXTS:
-                raise HTTPException(400, f"unsupported image file: {image.filename!r}")
-            logger.warning("cannot compress upload %r, storing original", image.filename)
-            data = raw
-        name = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.{ext}"
-        (config.UPLOAD_DIR / name).write_bytes(data)
-        image_path = f"uploads/{name}"
+    image_path = await save_upload(image) if image is not None else None
 
     meal_id = db.insert_meal(db.now_iso(), text, image_path)
     worker.enqueue_meal(meal_id)
@@ -198,6 +201,53 @@ def recalc_meal(meal_id: int):
     db.update_meal(meal_id, {"status": "pending", "error": None})
     worker.enqueue_meal(meal_id)
     return {"id": meal_id, "status": "pending"}
+
+
+# ---------- food checks ----------
+
+VERDICT_LABELS = {"ok": "🟢 可以吃", "moderate": "🟡 适量", "avoid": "🔴 不建议"}
+
+
+def _check_summary(check: dict) -> str | None:
+    """Plain-text result for the iOS shortcut to show as-is."""
+    if check["status"] != "done":
+        return None
+    est = check["estimate"]
+    return (
+        f"{VERDICT_LABELS[check['verdict']]} · 约 {est['kcal']:.0f} kcal\n"
+        f"{est['description']}\n"
+        f"蛋白质 {est['protein_g']:.0f}g · 碳水 {est['carbs_g']:.0f}g · 脂肪 {est['fat_g']:.0f}g\n\n"
+        f"{check['advice']}"
+    )
+
+
+@app.post("/api/checks")
+async def create_check(image: UploadFile = File(...)):
+    image_path = await save_upload(image)
+    check_id = db.insert_check(image_path)
+    worker.enqueue_check(check_id)
+    return {"id": check_id, "status": "pending"}
+
+
+@app.get("/api/checks/{check_id}")
+def get_check(check_id: int):
+    check = db.get_check(check_id)
+    if check is None:
+        raise HTTPException(404, "check not found")
+    return {**check, "summary": _check_summary(check)}
+
+
+@app.post("/api/checks/{check_id}/eat")
+def eat_check(check_id: int):
+    check = db.get_check(check_id)
+    if check is None:
+        raise HTTPException(404, "check not found")
+    if check["status"] != "done":
+        raise HTTPException(400, f"check is {check['status']}, only finished checks can be eaten")
+    meal_id = db.eat_check(check_id)
+    if meal_id is None:
+        raise HTTPException(409, "check already recorded as a meal")
+    return db.get_meal(meal_id)
 
 
 # ---------- calendar ----------

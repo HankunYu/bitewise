@@ -46,7 +46,7 @@ systemctl --user enable --now bitewise@alice
 
 ## 手机端
 
-见 [docs/shortcut.md](docs/shortcut.md):两个快捷指令(拍照记饭、文字记录/修正/体重),都打同一个 `/api/upload`。
+见 [docs/shortcut.md](docs/shortcut.md):三个快捷指令——拍照记饭、文字记录/修正/体重(都打 `/api/upload`),以及吃之前问「能吃吗」(`/api/checks`)。
 
 ## API 摘要
 
@@ -60,3 +60,6 @@ systemctl --user enable --now bitewise@alice
 | GET / POST / DELETE | `/api/weights` | 体重记录 |
 | POST | `/api/advice/{date}/generate` | (重新)生成当日建议 |
 | GET / PUT | `/api/settings` | 目标、提示词、餐次边界等 |
+| POST | `/api/checks` | 「能吃吗」咨询:multipart `image`,异步分析 |
+| GET | `/api/checks/{id}` | 咨询结果(含快捷指令直接显示的 `summary`) |
+| POST | `/api/checks/{id}/eat` | 把咨询记成一顿饭 |
