@@ -11,13 +11,23 @@ class AIError(Exception):
 
 
 def _call_claude(prompt: str, timeout: int = 300) -> str:
-    """Run claude -p and return the result text."""
+    """Run claude -p and return the result text.
+
+    Prompts embed user-supplied text, so the session is locked down against
+    prompt injection: only the Read tool exists, user settings (e.g. a global
+    auto permission mode) and MCP servers are ignored, file access is confined
+    to the working dirs, and anything not pre-allowed is denied.
+    """
     cmd = [
         "claude", "-p",
-        "--model", db.get_setting("model"),
+        f"--model={db.get_setting('model')}",
         "--output-format", "json",
         "--no-session-persistence",
+        "--restricted",
+        "--strict-mcp-config",
+        "--tools", "Read",
         "--allowedTools", "Read",
+        "--permission-mode", "dontAsk",
         "--add-dir", str(config.UPLOAD_DIR),
     ]
     try:

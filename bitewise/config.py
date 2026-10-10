@@ -18,7 +18,7 @@ DEFAULT_SETTINGS = {
     "daily_kcal_target": "2000",
     "goal_prompt": "",
     "advice_time": "23:00",
-    "model": "claude-opus-5",
+    "model": "claude-opus-5-5",
     "meal_slots": '{"breakfast": ["05:00", "10:30"], "lunch": ["10:30", "15:00"], "dinner": ["17:00", "22:00"]}',
     # Daily nutrient targets: {nutrient: number}. protein/fiber are floors, the rest are caps.
     "nutrient_targets": "{}",
