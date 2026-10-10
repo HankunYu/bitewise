@@ -1,0 +1,14 @@
+[Unit]
+Description=bitewise meal tracker
+After=network-online.target
+
+[Service]
+# Repo paths below are placeholders, rendered by systemd/install.sh
+WorkingDirectory=@BITEWISE_HOME@
+# Host, port and the API key come from .env; users from users.toml
+ExecStart=@BITEWISE_HOME@/.venv/bin/python -m bitewise
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

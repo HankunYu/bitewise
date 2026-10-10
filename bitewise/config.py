@@ -4,16 +4,18 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-# Project-wide secrets (ANTHROPIC_API_KEY). Variables already set in the
-# environment win, so a per-user systemd EnvironmentFile can override them.
+# Server-wide settings (ANTHROPIC_API_KEY, BITEWISE_HOST, BITEWISE_PORT).
+# Variables already set in the environment win over the file.
 load_dotenv(BASE_DIR / ".env")
+# Root of all user data; each user gets data/<name>/ (SQLite + uploaded photos).
 DATA_DIR = Path(os.environ.get("BITEWISE_DATA", BASE_DIR / "data"))
-UPLOAD_DIR = DATA_DIR / "uploads"
-DB_PATH = DATA_DIR / "bitewise.db"
+# User name -> access token; see users.py.
+USERS_FILE = Path(os.environ.get("BITEWISE_USERS", BASE_DIR / "users.toml"))
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-DEFAULT_HOST = "0.0.0.0"
-DEFAULT_PORT = 8600
+# Loopback by default: public access goes through a TLS reverse proxy.
+DEFAULT_HOST = os.environ.get("BITEWISE_HOST", "127.0.0.1")
+DEFAULT_PORT = int(os.environ.get("BITEWISE_PORT", "8600"))
 
 # Per-meal nutrient columns the AI estimates; kcal is tracked separately.
 NUTRIENT_KEYS = ("protein_g", "carbs_g", "fat_g", "fiber_g", "sugar_g", "sodium_mg")
@@ -29,8 +31,3 @@ DEFAULT_SETTINGS = {
     "nutrient_targets": "{}",
     "nutrient_targets_job": '{"status": "idle", "error": null}',
 }
-
-
-def ensure_dirs() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)

@@ -5,12 +5,14 @@ import re
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 
-from . import config, db, scheduler, worker
+from . import auth, config, db, scheduler, users, worker
+from .auth import current_store
+from .db import Store
 
 logger = logging.getLogger("bitewise")
 
@@ -39,8 +41,8 @@ def compress_image(raw: bytes) -> bytes:
     return buf.getvalue()
 
 
-async def save_upload(image: UploadFile) -> str:
-    """Store an uploaded photo under the upload dir; returns its DATA_DIR-relative path."""
+async def save_upload(store: Store, image: UploadFile) -> str:
+    """Store an uploaded photo in the user's upload dir; returns its data_dir-relative path."""
     raw = await image.read()
     try:
         data, ext = compress_image(raw), "jpeg"
@@ -53,21 +55,27 @@ async def save_upload(image: UploadFile) -> str:
         logger.warning("cannot compress upload %r, storing original", image.filename)
         data = raw
     name = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.{ext}"
-    (config.UPLOAD_DIR / name).write_bytes(data)
+    (store.upload_dir / name).write_bytes(data)
     return f"uploads/{name}"
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    config.ensure_dirs()
-    db.init_db()
+    users.load()
+    for store in users.all_stores():
+        store.init()
     worker.start()
     scheduler.start()
     yield
 
 
-app = FastAPI(title="bitewise", lifespan=lifespan)
+# No auto-generated docs: the API is private and the schema would be public.
+app = FastAPI(title="bitewise", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app.add_exception_handler(auth.NotAuthenticated, auth.not_authenticated_handler)
+# Everything on this router requires a logged-in user; only the session
+# endpoints, the login page and /static are registered on the app directly.
+router = APIRouter(dependencies=[Depends(current_store)])
 
 
 @app.middleware("http")
@@ -89,8 +97,12 @@ def _parse_date(value: str) -> str:
 
 # ---------- ingest ----------
 
-@app.post("/api/upload")
-async def upload(image: UploadFile | None = File(None), text: str = Form("")):
+@router.post("/api/upload")
+async def upload(
+    image: UploadFile | None = File(None),
+    text: str = Form(""),
+    store: Store = Depends(current_store),
+):
     text = text.strip()
     if image is None and not text:
         raise HTTPException(400, "need an image or some text")
@@ -102,36 +114,36 @@ async def upload(image: UploadFile | None = File(None), text: str = Form("")):
             kg = float(match.group(1))
             if match.group(2) == "斤":
                 kg /= 2
-            weight_id = db.insert_weight(kg)
+            weight_id = store.insert_weight(kg)
             return {"type": "weight", "id": weight_id, "weight_kg": kg}
 
-    image_path = await save_upload(image) if image is not None else None
+    image_path = await save_upload(store, image) if image is not None else None
 
-    meal_id = db.insert_meal(db.now_iso(), text, image_path)
-    worker.enqueue_meal(meal_id)
+    meal_id = store.insert_meal(db.now_iso(), text, image_path)
+    worker.enqueue_meal(store, meal_id)
     return {"type": "meal", "id": meal_id, "status": "pending"}
 
 
 # ---------- meals ----------
 
-@app.get("/api/day/{day}")
-def get_day(day: str):
+@router.get("/api/day/{day}")
+def get_day(day: str, store: Store = Depends(current_store)):
     day = _parse_date(day)
-    meals = db.list_meals(f"{day}T00:00:00", f"{day}T23:59:59")
+    meals = store.list_meals(f"{day}T00:00:00", f"{day}T23:59:59")
     done = [m for m in meals if m["status"] == "done"]
     totals = {
         key: round(sum(m[key] or 0 for m in done), 1)
         for key in ("kcal", *config.NUTRIENT_KEYS)
     }
-    weights = db.list_weights(day)
+    weights = store.list_weights(day)
     weight = next((w["weight_kg"] for w in reversed(weights) if w["measured_at"][:10] == day), None)
-    advice = db.get_advice(day)
+    advice = store.get_advice(day)
     return {
         "date": day,
         "meals": meals,
         "totals": totals,
-        "target": int(db.get_setting("daily_kcal_target")),
-        "nutrient_targets": db.get_nutrient_targets(),
+        "target": int(store.get_setting("daily_kcal_target")),
+        "nutrient_targets": store.get_nutrient_targets(),
         "advice": {
             "text": advice["advice"] or None,
             "status": advice["status"],
@@ -141,9 +153,9 @@ def get_day(day: str):
     }
 
 
-@app.patch("/api/meals/{meal_id}")
-def patch_meal(meal_id: int, fields: dict):
-    if db.get_meal(meal_id) is None:
+@router.patch("/api/meals/{meal_id}")
+def patch_meal(meal_id: int, fields: dict, store: Store = Depends(current_store)):
+    if store.get_meal(meal_id) is None:
         raise HTTPException(404, "meal not found")
     clean = {}
     for key, value in fields.items():
@@ -161,45 +173,45 @@ def patch_meal(meal_id: int, fields: dict):
                 raise HTTPException(400, "eaten_at must be ISO datetime")
             clean["eaten_at"] = dt.strftime("%Y-%m-%dT%H:%M:%S")
             if "meal_slot" not in fields:
-                clean["meal_slot"] = db.slot_for(dt)
+                clean["meal_slot"] = store.slot_for(dt)
         else:
             clean[key] = value
     if not clean:
         raise HTTPException(400, "no fields to update")
-    db.update_meal(meal_id, clean)
-    return db.get_meal(meal_id)
+    store.update_meal(meal_id, clean)
+    return store.get_meal(meal_id)
 
 
-@app.delete("/api/meals/{meal_id}")
-def remove_meal(meal_id: int):
-    if db.get_meal(meal_id) is None:
+@router.delete("/api/meals/{meal_id}")
+def remove_meal(meal_id: int, store: Store = Depends(current_store)):
+    if store.get_meal(meal_id) is None:
         raise HTTPException(404, "meal not found")
-    db.delete_meal(meal_id)
+    store.delete_meal(meal_id)
     return {"deleted": meal_id}
 
 
-@app.post("/api/meals/{meal_id}/retry")
-def retry_meal(meal_id: int):
-    meal = db.get_meal(meal_id)
+@router.post("/api/meals/{meal_id}/retry")
+def retry_meal(meal_id: int, store: Store = Depends(current_store)):
+    meal = store.get_meal(meal_id)
     if meal is None:
         raise HTTPException(404, "meal not found")
     if meal["status"] != "failed":
         raise HTTPException(400, f"meal is {meal['status']}, only failed meals can be retried")
-    db.update_meal(meal_id, {"status": "pending", "error": None})
-    worker.enqueue_meal(meal_id)
+    store.update_meal(meal_id, {"status": "pending", "error": None})
+    worker.enqueue_meal(store, meal_id)
     return {"id": meal_id, "status": "pending"}
 
 
-@app.post("/api/meals/{meal_id}/recalc")
-def recalc_meal(meal_id: int):
+@router.post("/api/meals/{meal_id}/recalc")
+def recalc_meal(meal_id: int, store: Store = Depends(current_store)):
     """Re-estimate a finished meal, taking its current description as the truth."""
-    meal = db.get_meal(meal_id)
+    meal = store.get_meal(meal_id)
     if meal is None:
         raise HTTPException(404, "meal not found")
     if meal["status"] != "done":
         raise HTTPException(400, f"meal is {meal['status']}, only finished meals can be recalculated")
-    db.update_meal(meal_id, {"status": "pending", "error": None})
-    worker.enqueue_meal(meal_id)
+    store.update_meal(meal_id, {"status": "pending", "error": None})
+    worker.enqueue_meal(store, meal_id)
     return {"id": meal_id, "status": "pending"}
 
 
@@ -221,39 +233,39 @@ def _check_summary(check: dict) -> str | None:
     )
 
 
-@app.post("/api/checks")
-async def create_check(image: UploadFile = File(...)):
-    image_path = await save_upload(image)
-    check_id = db.insert_check(image_path)
-    worker.enqueue_check(check_id)
+@router.post("/api/checks")
+async def create_check(image: UploadFile = File(...), store: Store = Depends(current_store)):
+    image_path = await save_upload(store, image)
+    check_id = store.insert_check(image_path)
+    worker.enqueue_check(store, check_id)
     return {"id": check_id, "status": "pending"}
 
 
-@app.get("/api/checks/{check_id}")
-def get_check(check_id: int):
-    check = db.get_check(check_id)
+@router.get("/api/checks/{check_id}")
+def get_check(check_id: int, store: Store = Depends(current_store)):
+    check = store.get_check(check_id)
     if check is None:
         raise HTTPException(404, "check not found")
     return {**check, "summary": _check_summary(check)}
 
 
-@app.post("/api/checks/{check_id}/eat")
-def eat_check(check_id: int):
-    check = db.get_check(check_id)
+@router.post("/api/checks/{check_id}/eat")
+def eat_check(check_id: int, store: Store = Depends(current_store)):
+    check = store.get_check(check_id)
     if check is None:
         raise HTTPException(404, "check not found")
     if check["status"] != "done":
         raise HTTPException(400, f"check is {check['status']}, only finished checks can be eaten")
-    meal_id = db.eat_check(check_id)
+    meal_id = store.eat_check(check_id)
     if meal_id is None:
         raise HTTPException(409, "check already recorded as a meal")
-    return db.get_meal(meal_id)
+    return store.get_meal(meal_id)
 
 
 # ---------- calendar ----------
 
-@app.get("/api/calendar/{ym}")
-def calendar_month(ym: str):
+@router.get("/api/calendar/{ym}")
+def calendar_month(ym: str, store: Store = Depends(current_store)):
     try:
         first = date.fromisoformat(f"{ym}-01")
     except ValueError:
@@ -262,73 +274,73 @@ def calendar_month(ym: str):
     last = next_month - timedelta(days=1)
     return {
         "month": ym,
-        "days": db.daily_totals(first.isoformat(), last.isoformat()),
-        "target": int(db.get_setting("daily_kcal_target")),
+        "days": store.daily_totals(first.isoformat(), last.isoformat()),
+        "target": int(store.get_setting("daily_kcal_target")),
     }
 
 
 # ---------- trends ----------
 
-@app.get("/api/trends")
-def trends(days: int = 30):
+@router.get("/api/trends")
+def trends(days: int = 30, store: Store = Depends(current_store)):
     days = max(1, min(days, 365))
     end = date.today()
     start = end - timedelta(days=days - 1)
     return {
         "start": start.isoformat(),
         "end": end.isoformat(),
-        "days": db.daily_totals(start.isoformat(), end.isoformat()),
-        "weights": db.list_weights(start.isoformat()),
-        "target": int(db.get_setting("daily_kcal_target")),
+        "days": store.daily_totals(start.isoformat(), end.isoformat()),
+        "weights": store.list_weights(start.isoformat()),
+        "target": int(store.get_setting("daily_kcal_target")),
     }
 
 
 # ---------- weights ----------
 
-@app.get("/api/weights")
-def get_weights(days: int = 90):
+@router.get("/api/weights")
+def get_weights(days: int = 90, store: Store = Depends(current_store)):
     start = date.today() - timedelta(days=max(1, min(days, 3650)) - 1)
-    return db.list_weights(start.isoformat())
+    return store.list_weights(start.isoformat())
 
 
-@app.post("/api/weights")
-def add_weight(body: dict):
+@router.post("/api/weights")
+def add_weight(body: dict, store: Store = Depends(current_store)):
     try:
         kg = float(body["weight_kg"])
     except (KeyError, TypeError, ValueError):
         raise HTTPException(400, "weight_kg must be a number")
     measured_at = body.get("measured_at") or db.now_iso()
-    weight_id = db.insert_weight(kg, measured_at)
+    weight_id = store.insert_weight(kg, measured_at)
     return {"id": weight_id, "weight_kg": kg, "measured_at": measured_at}
 
 
-@app.delete("/api/weights/{weight_id}")
-def remove_weight(weight_id: int):
-    db.delete_weight(weight_id)
+@router.delete("/api/weights/{weight_id}")
+def remove_weight(weight_id: int, store: Store = Depends(current_store)):
+    store.delete_weight(weight_id)
     return {"deleted": weight_id}
 
 
 # ---------- advice ----------
 
-@app.post("/api/advice/{day}/generate")
-def generate_advice(day: str):
+@router.post("/api/advice/{day}/generate")
+def generate_advice(day: str, store: Store = Depends(current_store)):
     day = _parse_date(day)
-    if not db.day_has_done_meals(day):
+    if not store.day_has_done_meals(day):
         raise HTTPException(400, "no finished meals on that day")
-    db.create_advice_job(day)
-    worker.enqueue_advice(day)
+    store.create_advice_job(day)
+    worker.enqueue_advice(store, day)
     return {"date": day, "status": "pending"}
 
 
 # ---------- settings ----------
 
-@app.get("/api/settings")
-def get_settings():
-    return db.get_all_settings()
+@router.get("/api/settings")
+def get_settings(store: Store = Depends(current_store)):
+    return store.get_all_settings()
 
 
-@app.put("/api/settings")
-def put_settings(values: dict):
+@router.put("/api/settings")
+def put_settings(values: dict, store: Store = Depends(current_store)):
     unknown = set(values) - set(config.DEFAULT_SETTINGS)
     if unknown:
         raise HTTPException(400, f"unknown settings: {', '.join(sorted(unknown))}")
@@ -358,27 +370,67 @@ def put_settings(values: dict):
                 {k: round(float(v), 1) for k, v in targets.items()}, ensure_ascii=False)
         except (ValueError, TypeError, AttributeError, AssertionError):
             raise HTTPException(400, "nutrient_targets must be {nutrient: number} JSON")
-    db.set_settings(values)
-    return db.get_all_settings()
+    store.set_settings(values)
+    return store.get_all_settings()
 
 
-@app.post("/api/nutrient-targets/generate")
-def generate_nutrient_targets():
-    job = db.get_targets_job()
+@router.post("/api/nutrient-targets/generate")
+def generate_nutrient_targets(store: Store = Depends(current_store)):
+    job = store.get_targets_job()
     if job["status"] in ("pending", "processing"):
         return {"status": job["status"]}
-    db.set_targets_job("pending")
-    worker.enqueue_targets()
+    store.set_targets_job("pending")
+    worker.enqueue_targets(store)
     return {"status": "pending"}
+
+
+# ---------- session ----------
+
+@app.get("/login")
+def login_page():
+    return FileResponse(config.STATIC_DIR / "login.html")
+
+
+@app.post("/api/session")
+def login(request: Request, body: dict):
+    token = str(body.get("token", "")).strip()
+    store = users.authenticate(token)
+    if store is None:
+        raise HTTPException(401, "invalid token")
+    response = JSONResponse({"user": store.user})
+    auth.set_session(request, response, token)
+    return response
+
+
+@app.delete("/api/session")
+def logout():
+    response = JSONResponse({"logged_out": True})
+    auth.clear_session(response)
+    return response
+
+
+@router.get("/api/me")
+def me(store: Store = Depends(current_store)):
+    return {"user": store.user}
 
 
 # ---------- frontend ----------
 
 app.mount("/static", StaticFiles(directory=config.STATIC_DIR), name="static")
-# Meal photos; check_dir=False because the data dir is created at startup, after import.
-app.mount("/uploads", StaticFiles(directory=config.UPLOAD_DIR, check_dir=False), name="uploads")
 
 
-@app.get("/")
+@router.get("/uploads/{name}")
+def upload_file(name: str, store: Store = Depends(current_store)):
+    # Photos are per user: resolve inside the caller's own upload dir only.
+    path = (store.upload_dir / name).resolve()
+    if path.parent != store.upload_dir.resolve() or not path.is_file():
+        raise HTTPException(404, "not found")
+    return FileResponse(path)
+
+
+@router.get("/")
 def index():
     return FileResponse(config.STATIC_DIR / "index.html")
+
+
+app.include_router(router)

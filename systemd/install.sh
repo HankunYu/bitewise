@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Render bitewise@.service with this repo's absolute path and install it as a user unit.
+# Render bitewise.service with this repo's absolute path and install it as a user unit.
 # Re-run after moving the repo.
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-unit_name="bitewise@.service"
+unit_name="bitewise.service"
 
 if [[ "$repo_dir" == *"|"* ]]; then
     echo "Repo path must not contain '|': $repo_dir" >&2

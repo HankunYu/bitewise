@@ -38,6 +38,11 @@ function cssVar(name) {
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
+  if (res.status === 401) {
+    // Session missing or token revoked: back to the login form.
+    location.replace("/login");
+    throw new Error("not authenticated");
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail || detail; } catch (e) { /* ignore */ }
@@ -855,7 +860,8 @@ function hideTooltip() {
 const SLOT_ORDER = ["breakfast", "lunch", "dinner"];
 
 async function loadSettings() {
-  const s = await api("/api/settings");
+  const [s, me] = await Promise.all([api("/api/settings"), api("/api/me")]);
+  $("#account-user").textContent = me.user;
   $("#set-target").value = s.daily_kcal_target;
   $("#set-goal").value = s.goal_prompt;
   $("#set-advice-time").value = s.advice_time;
@@ -963,6 +969,11 @@ $("#settings-save").addEventListener("click", async () => {
   } catch (err) {
     note.textContent = `保存失败:${err.message}`;
   }
+});
+
+$("#logout").addEventListener("click", async () => {
+  await fetch("/api/session", { method: "DELETE" });
+  location.replace("/login");
 });
 
 // ---------------- misc ----------------

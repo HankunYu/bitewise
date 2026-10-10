@@ -238,6 +238,11 @@ button.ghost {
 .nutrient-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .nutrient-grid label { margin: 0 0 4px; font-size: 12px; }
 .targets-actions { margin-top: 10px; }
+.account-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+
+/* ---- login ---- */
+.login-form { max-width: 360px; margin: 48px auto 0; }
+.login-actions { margin-top: 16px; }
 button.ghost:disabled { opacity: .5; cursor: default; }
 
 /* ---- lightbox ---- */

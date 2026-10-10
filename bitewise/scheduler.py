@@ -3,7 +3,8 @@ import threading
 import time
 from datetime import date, datetime
 
-from . import db, worker
+from . import users, worker
+from .db import Store
 
 logger = logging.getLogger("bitewise.scheduler")
 
@@ -14,22 +15,23 @@ def start() -> None:
 
 def _run() -> None:
     while True:
-        try:
-            _tick()
-        except Exception:
-            logger.exception("scheduler tick failed")
+        for store in users.all_stores():
+            try:
+                _tick(store)
+            except Exception:
+                logger.exception("[%s] scheduler tick failed", store.user)
         time.sleep(30)
 
 
-def _tick() -> None:
-    advice_time = db.get_setting("advice_time")
+def _tick(store: Store) -> None:
+    advice_time = store.get_setting("advice_time")
     if datetime.now().strftime("%H:%M") < advice_time:
         return
     today = date.today().isoformat()
-    if db.get_advice(today) is not None:
+    if store.get_advice(today) is not None:
         return
-    if not db.day_has_done_meals(today):
+    if not store.day_has_done_meals(today):
         return
-    logger.info("queueing daily advice for %s", today)
-    db.create_advice_job(today)
-    worker.enqueue_advice(today)
+    logger.info("[%s] queueing daily advice for %s", store.user, today)
+    store.create_advice_job(today)
+    worker.enqueue_advice(store, today)

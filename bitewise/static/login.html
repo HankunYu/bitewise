@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>bitewise · 登录</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍜</text></svg>">
+</head>
+<body>
+<header>
+  <h1>🍜 bitewise</h1>
+</header>
+<main>
+  <form class="card settings-form login-form" id="login-form">
+    <h2>登录</h2>
+    <label for="token">访问令牌</label>
+    <input type="password" id="token" autocomplete="current-password" required autofocus>
+    <div class="login-actions">
+      <button class="primary" type="submit">登录</button>
+      <span class="save-note error" id="login-note"></span>
+    </div>
+  </form>
+</main>
+<script>
+"use strict";
+document.getElementById("login-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const note = document.getElementById("login-note");
+  note.textContent = "";
+  const res = await fetch("/api/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token: document.getElementById("token").value }),
+  });
+  if (res.ok) {
+    location.replace("/");
+  } else {
+    note.textContent = res.status === 401 ? "令牌无效" : `登录失败 (${res.status})`;
+  }
+});
+</script>
+</body>
+</html>

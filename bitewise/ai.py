@@ -8,7 +8,8 @@ from typing import Literal
 import anthropic
 from pydantic import BaseModel, Field
 
-from . import config, db
+from . import config
+from .db import Store
 
 
 class AIError(Exception):
@@ -99,10 +100,11 @@ def _client() -> anthropic.Anthropic:
     return anthropic.Anthropic(timeout=REQUEST_TIMEOUT)
 
 
-def _call(content: list[dict], output_format: type[BaseModel] | None = None, effort: str = EFFORT):
+def _call(store: Store, content: list[dict], output_format: type[BaseModel] | None = None,
+          effort: str = EFFORT):
     """Send one user turn; returns the parsed model when output_format is set, else the text."""
     params = dict(
-        model=db.get_setting("model"),
+        model=store.get_setting("model"),
         max_tokens=MAX_TOKENS,
         output_config={"effort": effort},
         betas=[FALLBACK_BETA],
@@ -138,8 +140,8 @@ def _call(content: list[dict], output_format: type[BaseModel] | None = None, eff
     return "".join(block.text for block in response.content if block.type == "text").strip()
 
 
-def _image_block(image_rel_path: str) -> dict:
-    path = config.DATA_DIR / image_rel_path
+def _image_block(store: Store, image_rel_path: str) -> dict:
+    path = store.data_dir / image_rel_path
     media_type = IMAGE_MEDIA_TYPES.get(path.suffix.lstrip(".").lower())
     if media_type is None:
         raise AIError(f"image format not supported by the API: {path.name}")
@@ -157,8 +159,8 @@ def _text_block(parts: list[str]) -> dict:
     return {"type": "text", "text": "\n".join(p for p in parts if p)}
 
 
-def _goal_block() -> str:
-    goal = db.get_setting("goal_prompt").strip()
+def _goal_block(store: Store) -> str:
+    goal = store.get_setting("goal_prompt").strip()
     return f"用户的目标:{goal}\n" if goal else ""
 
 
@@ -178,7 +180,7 @@ def _meal_dict(meal: MealEstimate) -> dict:
 
 # ---------- features ----------
 
-def estimate_meal(image_rel_path: str | None, text: str, correction: str = "") -> dict:
+def estimate_meal(store: Store, image_rel_path: str | None, text: str, correction: str = "") -> dict:
     """Estimate calories/macros for one meal from an image and/or text.
 
     correction: user-confirmed description of what the meal actually is;
@@ -194,16 +196,16 @@ def estimate_meal(image_rel_path: str | None, text: str, correction: str = "") -
             f"注意:之前的识别有误,用户已更正,这顿饭实际是:「{correction.strip()}」。"
             "请以更正内容为准重新估算,图片和原描述仅用于参考分量。"
         )
-    parts.append(_goal_block())
+    parts.append(_goal_block(store))
     parts.append("按常见分量合理估算,不确定时取中间值。")
-    content = [_image_block(image_rel_path)] if image_rel_path else []
+    content = [_image_block(store, image_rel_path)] if image_rel_path else []
     content.append(_text_block(parts))
-    return _meal_dict(_call(content, MealEstimate))
+    return _meal_dict(_call(store, content, MealEstimate))
 
 
-def interpret_text(text: str) -> dict:
+def interpret_text(store: Store, text: str) -> dict:
     """Classify a text-only message into an action; meal logs include the estimate inline."""
-    recent = db.recent_done_meals(8)
+    recent = store.recent_done_meals(8)
     recent_brief = [
         {
             "id": m["id"],
@@ -221,7 +223,7 @@ def interpret_text(text: str) -> dict:
 最近的饮食记录(JSON):
 {json.dumps(recent_brief, ensure_ascii=False)}
 
-{_goal_block()}用户消息:「{text.strip()}」
+{_goal_block(store)}用户消息:「{text.strip()}」
 
 判断意图,设置 action 并只填写该 action 用到的字段:
 - add_meal:记录一顿饭,填 meal(作为营养师估算,不确定时取常见分量中间值);仅当用户明确提到时间时填 eaten_at。
@@ -230,7 +232,7 @@ def interpret_text(text: str) -> dict:
 - add_weight:记录体重,填 weight_kg。
 
 "刚才那顿"、"上一条"指最近的一条记录。如果无法确定用户指哪条记录,当作 add_meal 处理。"""
-    result = _call([_text_block([prompt])], TextAction)
+    result = _call(store, [_text_block([prompt])], TextAction)
     if result.action == "add_meal" and result.meal is None:
         raise AIError("add_meal returned without a meal estimate")
     if result.action in ("update_meal", "delete_meal") and result.id is None:
@@ -259,14 +261,14 @@ def _update_fields(updates: list[FieldUpdate]) -> dict:
     return fields
 
 
-def check_food(image_rel_path: str) -> dict:
+def check_food(store: Store, image_rel_path: str) -> dict:
     """Advise whether to eat the pictured food, given what was already eaten today.
 
     Returns {"verdict", "advice", "estimate"}; estimate has the meal shape so an
     eaten check can be stored as a meal without another model call.
     """
     today = datetime.now().date().isoformat()
-    meals = [m for m in db.list_meals(f"{today}T00:00:00", f"{today}T23:59:59")
+    meals = [m for m in store.list_meals(f"{today}T00:00:00", f"{today}T23:59:59")
              if m["status"] == "done"]
     meals_brief = [
         {"meal_slot": m["meal_slot"], "description": m["description"], "kcal": m["kcal"]}
@@ -276,7 +278,7 @@ def check_food(image_rel_path: str) -> dict:
         key: round(sum(m[key] or 0 for m in meals), 1)
         for key in ("kcal", *config.NUTRIENT_KEYS)
     }
-    targets = db.get_nutrient_targets()
+    targets = store.get_nutrient_targets()
     targets_line = (
         f"每日营养目标(蛋白质/纤维为下限,其余为上限,JSON):{json.dumps(targets, ensure_ascii=False)}\n"
         if targets else ""
@@ -285,12 +287,13 @@ def check_food(image_rel_path: str) -> dict:
     prompt = f"""你是一位营养师。用户还没吃,拍了上面这张食物照片问你:这个能不能吃、吃了会怎样。
 
 当前时间:{now}
-{_goal_block()}每日卡路里目标:{db.get_setting("daily_kcal_target")} kcal
+{_goal_block(store)}每日卡路里目标:{store.get_setting("daily_kcal_target")} kcal
 {targets_line}今天已经吃的(JSON):{json.dumps(meals_brief, ensure_ascii=False)}
 今天已摄入合计(JSON):{json.dumps(totals, ensure_ascii=False)}
 
 估算这份食物的营养成分(填 meal),结合今天剩余额度、当前时间和用户目标,给出 verdict 和 advice。"""
-    result = _call([_image_block(image_rel_path), _text_block([prompt])], FoodCheck, effort=CHECK_EFFORT)
+    result = _call(
+        store, [_image_block(store, image_rel_path), _text_block([prompt])], FoodCheck, effort=CHECK_EFFORT)
     return {
         "verdict": result.verdict,
         "advice": result.advice.strip(),
@@ -298,13 +301,13 @@ def check_food(image_rel_path: str) -> dict:
     }
 
 
-def nutrient_targets() -> dict:
+def nutrient_targets(store: Store) -> dict:
     """Generate daily nutrient targets from the user's goal, weight, and kcal target."""
-    weight = db.latest_weight()
+    weight = store.latest_weight()
     parts = [
         "你是一位营养师,请为用户制定每日营养摄入目标。",
-        _goal_block(),
-        f"每日卡路里目标:{db.get_setting('daily_kcal_target')} kcal",
+        _goal_block(store),
+        f"每日卡路里目标:{store.get_setting('daily_kcal_target')} kcal",
     ]
     if weight:
         parts.append(f"当前体重:{weight['weight_kg']} kg({weight['measured_at'][:10]} 记录)")
@@ -313,13 +316,13 @@ def nutrient_targets() -> dict:
         "按主流营养学共识估算(蛋白质按 g/kg 体重、纤维约 14g/1000kcal、糖和钠参考 WHO 建议),"
         "并结合用户目标调整。"
     )
-    result = _call([_text_block(parts)], NutrientTargets)
+    result = _call(store, [_text_block(parts)], NutrientTargets)
     return {key: round(getattr(result, key), 1) for key in config.NUTRIENT_KEYS}
 
 
-def daily_advice(date: str) -> str:
+def daily_advice(store: Store, date: str) -> str:
     """Generate the end-of-day advice paragraph for a date."""
-    meals = [m for m in db.list_meals(f"{date}T00:00:00", f"{date}T23:59:59")
+    meals = [m for m in store.list_meals(f"{date}T00:00:00", f"{date}T23:59:59")
              if m["status"] == "done"]
     meals_brief = [
         {
@@ -331,17 +334,17 @@ def daily_advice(date: str) -> str:
         for m in meals
     ]
     day = datetime.fromisoformat(f"{date}T00:00:00").date()
-    week = db.daily_totals((day - timedelta(days=6)).isoformat(), date)
-    weights = db.list_weights((day - timedelta(days=13)).isoformat())
+    week = store.daily_totals((day - timedelta(days=6)).isoformat(), date)
+    weights = store.list_weights((day - timedelta(days=13)).isoformat())
     weights_brief = [{"date": w["measured_at"][:10], "kg": w["weight_kg"]} for w in weights]
-    targets = db.get_nutrient_targets()
+    targets = store.get_nutrient_targets()
     targets_line = (
         f"每日营养目标(蛋白质/纤维为下限,其余为上限,JSON):{json.dumps(targets, ensure_ascii=False)}\n"
         if targets else ""
     )
     prompt = f"""你是一位营养师。根据用户 {date} 的饮食记录,写一段当日总结建议。
 
-{_goal_block()}每日卡路里目标:{db.get_setting("daily_kcal_target")} kcal
+{_goal_block(store)}每日卡路里目标:{store.get_setting("daily_kcal_target")} kcal
 {targets_line}
 当日各餐(JSON):
 {json.dumps(meals_brief, ensure_ascii=False)}
@@ -353,7 +356,7 @@ def daily_advice(date: str) -> str:
 {json.dumps(weights_brief, ensure_ascii=False)}
 
 要求:中文,3-5句话,先评价当日摄入与目标的差距和营养结构,再结合近期趋势给出明天的具体建议。直接输出建议正文,不要标题、不要列表、不要输出其他内容。"""
-    advice = _call([_text_block([prompt])])
+    advice = _call(store, [_text_block([prompt])])
     if not advice:
         raise AIError("empty advice from model")
     return advice
