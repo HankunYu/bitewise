@@ -1,7 +1,12 @@
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 BASE_DIR = Path(__file__).resolve().parent.parent
+# Project-wide secrets (ANTHROPIC_API_KEY). Variables already set in the
+# environment win, so a per-user systemd EnvironmentFile can override them.
+load_dotenv(BASE_DIR / ".env")
 DATA_DIR = Path(os.environ.get("BITEWISE_DATA", BASE_DIR / "data"))
 UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "bitewise.db"

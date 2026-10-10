@@ -23,7 +23,7 @@ JPEG_QUALITY = 82
 # Formats kept as-is when Pillow cannot re-encode them; anything else is
 # rejected so /uploads never serves attacker-chosen types like .html or .svg.
 RAW_IMAGE_EXTS = {"heic", "heif", "jpg", "jpeg", "png", "webp", "gif"}
-# Model names go straight onto the claude command line; no leading dash.
+# Sanity check for the model setting, which is sent as-is to the API.
 MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\[\]-]*")
 
 
@@ -338,7 +338,7 @@ def put_settings(values: dict):
         except (TypeError, ValueError):
             raise HTTPException(400, "daily_kcal_target must be an integer")
     if "model" in values and not MODEL_PATTERN.fullmatch(str(values["model"])):
-        raise HTTPException(400, "model must be a model name like claude-opus-5")
+        raise HTTPException(400, "model must be a model name like claude-opus-5-5")
     if "advice_time" in values and not re.fullmatch(r"\d{2}:\d{2}", str(values["advice_time"])):
         raise HTTPException(400, "advice_time must look like 23:00")
     if "meal_slots" in values:

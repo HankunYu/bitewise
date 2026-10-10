@@ -6,7 +6,7 @@
 
 ```
 iPhone 快捷指令 ──POST──▶ FastAPI 服务(本机常驻)
-                             ├─ 立即入库返回,后台队列调 claude -p 识别
+                             ├─ 立即入库返回,后台队列调 Claude API 识别
                              ├─ 文字输入由 AI 判断意图:记饭 / 修正记录 / 记体重
                              ├─ 每晚定时生成当日总结建议
                              └─ 内网网页 Dashboard(今日 / 趋势 / 设置)
@@ -17,12 +17,13 @@ iPhone 快捷指令 ──POST──▶ FastAPI 服务(本机常驻)
 - 每顿饭记录:描述、食物明细、卡路里、蛋白质/碳水/脂肪、一句 AI 点评
 - 餐次按上传时间自动划分(早/午/晚/加餐),边界可在设置中调整
 - 「我的目标」自由文本会注入每次 AI 调用,影响点评与建议口径
-- 依赖本机已登录的 `claude` CLI,无需额外 API key
+- 直接调用 Anthropic API,API key 放在项目根目录的 `.env`(见下方「运行」)
 
 ## 运行
 
 ```bash
 uv sync
+cp .env.example .env   # 填入 ANTHROPIC_API_KEY
 .venv/bin/python -m bitewise --host 0.0.0.0 --port 8600
 ```
 
