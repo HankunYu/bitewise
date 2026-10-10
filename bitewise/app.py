@@ -418,6 +418,24 @@ def me(store: Store = Depends(current_store)):
 
 app.mount("/static", StaticFiles(directory=config.STATIC_DIR), name="static")
 
+# Well-known icon paths that browsers and iOS probe at the site root without
+# reading the page's <link> tags; public like /static.
+ROOT_ICONS = {
+    "/favicon.ico": "icon-192.png",
+    "/apple-touch-icon.png": "apple-touch-icon.png",
+    "/apple-touch-icon-precomposed.png": "apple-touch-icon.png",
+}
+
+
+def _root_icon(name: str):
+    def serve():
+        return FileResponse(config.STATIC_DIR / name, media_type="image/png")
+    return serve
+
+
+for _path, _name in ROOT_ICONS.items():
+    app.add_api_route(_path, _root_icon(_name), methods=["GET"])
+
 
 @router.get("/uploads/{name}")
 def upload_file(name: str, store: Store = Depends(current_store)):

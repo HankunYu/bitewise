@@ -14,6 +14,9 @@ PUBLIC_ROUTES = {
     ("GET", "/login"),
     ("POST", "/api/session"),
     ("DELETE", "/api/session"),
+    ("GET", "/favicon.ico"),
+    ("GET", "/apple-touch-icon.png"),
+    ("GET", "/apple-touch-icon-precomposed.png"),
 }
 
 
@@ -40,6 +43,13 @@ def test_every_non_public_route_requires_auth(client):
                 continue
             assert auth.current_store in _dependency_calls(route.dependant), (
                 f"{method} {route.path} is reachable without authentication")
+
+
+def test_root_icons_are_public(client):
+    for path in ("/favicon.ico", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
+        res = client.get(path)
+        assert res.status_code == 200
+        assert res.headers["content-type"] == "image/png"
 
 
 def test_api_docs_are_disabled(client):
