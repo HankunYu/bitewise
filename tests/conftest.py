@@ -4,12 +4,14 @@ from pathlib import Path
 
 import pytest
 
-# Point bitewise at a throwaway data dir before it is imported; an empty API key
-# keeps tests from ever reaching the real Anthropic API through .env.
+# Point bitewise at a throwaway data dir before it is imported; empty API keys
+# keep tests from ever reaching a real model API through .env.
 _TMP = Path(tempfile.mkdtemp(prefix="bitewise-test-"))
 os.environ["BITEWISE_DATA"] = str(_TMP / "data")
 os.environ["BITEWISE_USERS"] = str(_TMP / "users.toml")
-os.environ["ANTHROPIC_API_KEY"] = ""
+for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
+    os.environ[key] = ""
+os.environ["BITEWISE_PROVIDER"] = "anthropic"
 
 ALICE_TOKEN = "a" * 43
 BOB_TOKEN = "b" * 43

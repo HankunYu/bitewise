@@ -82,7 +82,7 @@ def test_login_sets_cookie_and_logout_clears_it(client):
     assert res.json() == {"user": "bob"}
     cookie = res.headers["set-cookie"]
     assert "HttpOnly" in cookie and "samesite=lax" in cookie.lower()
-    assert client.get("/api/me").json() == {"user": "bob"}
+    assert client.get("/api/me").json()["user"] == "bob"
 
     client.delete("/api/session")
     client.cookies.clear()
@@ -90,8 +90,8 @@ def test_login_sets_cookie_and_logout_clears_it(client):
 
 
 def test_bearer_identifies_user(client):
-    assert client.get("/api/me", headers=bearer(ALICE_TOKEN)).json() == {"user": "alice"}
-    assert client.get("/api/me", headers=bearer(BOB_TOKEN)).json() == {"user": "bob"}
+    assert client.get("/api/me", headers=bearer(ALICE_TOKEN)).json()["user"] == "alice"
+    assert client.get("/api/me", headers=bearer(BOB_TOKEN)).json()["user"] == "bob"
 
 
 # ---------- isolation ----------

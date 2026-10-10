@@ -862,6 +862,8 @@ const SLOT_ORDER = ["breakfast", "lunch", "dinner"];
 async function loadSettings() {
   const [s, me] = await Promise.all([api("/api/settings"), api("/api/me")]);
   $("#account-user").textContent = me.user;
+  $("#set-model").placeholder = `留空使用默认:${me.default_model}`;
+  $("#model-provider").textContent = me.provider;
   $("#set-target").value = s.daily_kcal_target;
   $("#set-goal").value = s.goal_prompt;
   $("#set-advice-time").value = s.advice_time;
@@ -1007,7 +1009,7 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () 
 });
 
 // Refresh immediately when the page returns to the foreground (e.g. after
-// logging a meal from the shortcut or Telegram and switching back).
+// logging a meal from the shortcut and switching back).
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && state.view === "today" && !$(".edit-form")) {
     loadDay();

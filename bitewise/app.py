@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 
-from . import auth, config, db, scheduler, users, worker
+from . import auth, config, db, llm, scheduler, users, worker
 from .auth import current_store
 from .db import Store
 
@@ -63,6 +63,7 @@ async def save_upload(store: Store, image: UploadFile) -> str:
 async def lifespan(_app: FastAPI):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     users.load()
+    llm.provider()  # unknown BITEWISE_PROVIDER fails startup
     for store in users.all_stores():
         store.init()
     worker.start()
@@ -349,8 +350,10 @@ def put_settings(values: dict, store: Store = Depends(current_store)):
             values["daily_kcal_target"] = str(int(values["daily_kcal_target"]))
         except (TypeError, ValueError):
             raise HTTPException(400, "daily_kcal_target must be an integer")
-    if "model" in values and not MODEL_PATTERN.fullmatch(str(values["model"])):
-        raise HTTPException(400, "model must be a model name like claude-opus-5-5")
+    if "model" in values:
+        values["model"] = str(values["model"]).strip()
+        if values["model"] and not MODEL_PATTERN.fullmatch(values["model"]):
+            raise HTTPException(400, "model must be a model name like claude-opus-5-5, or empty for the default")
     if "advice_time" in values and not re.fullmatch(r"\d{2}:\d{2}", str(values["advice_time"])):
         raise HTTPException(400, "advice_time must look like 23:00")
     if "meal_slots" in values:
@@ -411,7 +414,8 @@ def logout():
 
 @router.get("/api/me")
 def me(store: Store = Depends(current_store)):
-    return {"user": store.user}
+    provider = llm.provider()
+    return {"user": store.user, "provider": provider.name, "default_model": provider.default_model}
 
 
 # ---------- frontend ----------

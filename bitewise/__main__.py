@@ -3,7 +3,7 @@ import sys
 
 import uvicorn
 
-from . import config, users
+from . import config, llm, users
 
 
 def main() -> None:
@@ -22,7 +22,8 @@ def main() -> None:
     # Fail fast with a readable message instead of a startup traceback.
     try:
         users.load()
-    except users.UsersError as exc:
+        llm.provider()
+    except (users.UsersError, llm.AIError) as exc:
         sys.exit(f"bitewise: {exc}")
     uvicorn.run("bitewise.app:app", host=args.host, port=args.port)
 

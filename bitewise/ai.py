@@ -1,29 +1,16 @@
-import base64
-import functools
 import json
-import os
 from datetime import datetime, timedelta
 from typing import Literal
 
-import anthropic
 from pydantic import BaseModel, Field
 
-from . import config
+from . import config, llm
 from .db import Store
+from .llm import AIError, Effort, TModel
 
-
-class AIError(Exception):
-    pass
-
-
-EFFORT = "medium"
+EFFORT: Effort = "medium"
 # Checks are interactive (the user waits in the shortcut), so trade depth for speed.
-CHECK_EFFORT = "low"
-MAX_TOKENS = 16000
-REQUEST_TIMEOUT = 300.0
-# Server-side refusal fallback: a classifier-declined request is re-run on the
-# model Anthropic recommends for that refusal category, inside the same call.
-FALLBACK_BETA = "server-side-fallback-2026-07-01"
+CHECK_EFFORT: Effort = "low"
 IMAGE_MEDIA_TYPES = {
     "jpeg": "image/jpeg", "jpg": "image/jpeg", "png": "image/png",
     "gif": "image/gif", "webp": "image/webp",
@@ -89,74 +76,31 @@ class FoodCheck(BaseModel):
     meal: MealEstimate
 
 
-# ---------- API plumbing ----------
+# ---------- model plumbing ----------
 
-@functools.cache
-def _client() -> anthropic.Anthropic:
-    # Built on first use so the app starts (and non-AI pages work) without a key.
-    # The client is thread-safe and shared by all worker lanes.
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise AIError("ANTHROPIC_API_KEY is not set, fill it in .env")
-    return anthropic.Anthropic(timeout=REQUEST_TIMEOUT)
+def _model(store: Store) -> str:
+    """The user's model setting, or the provider's default when left empty."""
+    return store.get_setting("model").strip() or llm.provider().default_model
 
 
-def _call(store: Store, content: list[dict], output_format: type[BaseModel] | None = None,
-          effort: str = EFFORT):
-    """Send one user turn; returns the parsed model when output_format is set, else the text."""
-    params = dict(
-        model=store.get_setting("model"),
-        max_tokens=MAX_TOKENS,
-        output_config={"effort": effort},
-        betas=[FALLBACK_BETA],
-        fallbacks="default",
-        messages=[{"role": "user", "content": content}],
-    )
-    try:
-        if output_format is not None:
-            response = _client().beta.messages.parse(**params, output_format=output_format)
-        else:
-            response = _client().beta.messages.create(**params)
-    except anthropic.AuthenticationError as exc:
-        raise AIError("Anthropic API key missing or invalid, check .env") from exc
-    except anthropic.RateLimitError as exc:
-        raise AIError("rate limited by the Anthropic API, retry later") from exc
-    except anthropic.APIStatusError as exc:
-        raise AIError(f"Anthropic API error {exc.status_code}: {exc.message}"[:500]) from exc
-    except anthropic.APIConnectionError as exc:
-        raise AIError(f"cannot reach the Anthropic API: {exc}") from exc
-    except anthropic.AnthropicError as exc:
-        # e.g. no credentials configured at all
-        raise AIError(f"Anthropic client error: {exc}"[:500]) from exc
-
-    if response.stop_reason == "refusal":
-        category = response.stop_details.category if response.stop_details else None
-        raise AIError(f"model declined the request (category: {category})")
-    if response.stop_reason == "max_tokens":
-        raise AIError("model response was cut off at max_tokens")
-    if output_format is not None:
-        if response.parsed_output is None:
-            raise AIError("model returned no structured output")
-        return response.parsed_output
-    return "".join(block.text for block in response.content if block.type == "text").strip()
+def _structured(store: Store, parts: list[llm.Part], schema: type[TModel], effort: Effort = EFFORT) -> TModel:
+    return llm.provider().structured(_model(store), parts, schema, effort)
 
 
-def _image_block(store: Store, image_rel_path: str) -> dict:
+def _text(store: Store, parts: list[llm.Part], effort: Effort = EFFORT) -> str:
+    return llm.provider().text(_model(store), parts, effort)
+
+
+def _image_block(store: Store, image_rel_path: str) -> llm.Image:
     path = store.data_dir / image_rel_path
     media_type = IMAGE_MEDIA_TYPES.get(path.suffix.lstrip(".").lower())
     if media_type is None:
         raise AIError(f"image format not supported by the API: {path.name}")
-    return {
-        "type": "image",
-        "source": {
-            "type": "base64",
-            "media_type": media_type,
-            "data": base64.standard_b64encode(path.read_bytes()).decode("ascii"),
-        },
-    }
+    return llm.Image(media_type, path.read_bytes())
 
 
-def _text_block(parts: list[str]) -> dict:
-    return {"type": "text", "text": "\n".join(p for p in parts if p)}
+def _text_block(parts: list[str]) -> llm.Text:
+    return llm.Text("\n".join(p for p in parts if p))
 
 
 def _goal_block(store: Store) -> str:
@@ -200,7 +144,7 @@ def estimate_meal(store: Store, image_rel_path: str | None, text: str, correctio
     parts.append("按常见分量合理估算,不确定时取中间值。")
     content = [_image_block(store, image_rel_path)] if image_rel_path else []
     content.append(_text_block(parts))
-    return _meal_dict(_call(store, content, MealEstimate))
+    return _meal_dict(_structured(store, content, MealEstimate))
 
 
 def interpret_text(store: Store, text: str) -> dict:
@@ -232,7 +176,7 @@ def interpret_text(store: Store, text: str) -> dict:
 - add_weight:记录体重,填 weight_kg。
 
 "刚才那顿"、"上一条"指最近的一条记录。如果无法确定用户指哪条记录,当作 add_meal 处理。"""
-    result = _call(store, [_text_block([prompt])], TextAction)
+    result = _structured(store, [_text_block([prompt])], TextAction)
     if result.action == "add_meal" and result.meal is None:
         raise AIError("add_meal returned without a meal estimate")
     if result.action in ("update_meal", "delete_meal") and result.id is None:
@@ -292,7 +236,7 @@ def check_food(store: Store, image_rel_path: str) -> dict:
 今天已摄入合计(JSON):{json.dumps(totals, ensure_ascii=False)}
 
 估算这份食物的营养成分(填 meal),结合今天剩余额度、当前时间和用户目标,给出 verdict 和 advice。"""
-    result = _call(
+    result = _structured(
         store, [_image_block(store, image_rel_path), _text_block([prompt])], FoodCheck, effort=CHECK_EFFORT)
     return {
         "verdict": result.verdict,
@@ -316,7 +260,7 @@ def nutrient_targets(store: Store) -> dict:
         "按主流营养学共识估算(蛋白质按 g/kg 体重、纤维约 14g/1000kcal、糖和钠参考 WHO 建议),"
         "并结合用户目标调整。"
     )
-    result = _call(store, [_text_block(parts)], NutrientTargets)
+    result = _structured(store, [_text_block(parts)], NutrientTargets)
     return {key: round(getattr(result, key), 1) for key in config.NUTRIENT_KEYS}
 
 
@@ -356,7 +300,7 @@ def daily_advice(store: Store, date: str) -> str:
 {json.dumps(weights_brief, ensure_ascii=False)}
 
 要求:中文,3-5句话,先评价当日摄入与目标的差距和营养结构,再结合近期趋势给出明天的具体建议。直接输出建议正文,不要标题、不要列表、不要输出其他内容。"""
-    advice = _call(store, [_text_block([prompt])])
+    advice = _text(store, [_text_block([prompt])])
     if not advice:
         raise AIError("empty advice from model")
     return advice
