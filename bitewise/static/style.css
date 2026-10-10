@@ -59,6 +59,7 @@ header {
   z-index: 10;
 }
 header h1 { font-size: 18px; margin: 0; }
+header h1 .logo { width: 1.3em; height: 1.3em; margin-right: 8px; vertical-align: -0.3em; }
 nav { display: flex; gap: 4px; }
 nav button {
   border: none;
