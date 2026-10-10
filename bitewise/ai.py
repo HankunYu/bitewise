@@ -16,6 +16,8 @@ class AIError(Exception):
 
 
 EFFORT = "medium"
+# Checks are interactive (the user waits in the shortcut), so trade depth for speed.
+CHECK_EFFORT = "low"
 MAX_TOKENS = 16000
 REQUEST_TIMEOUT = 300.0
 # Server-side refusal fallback: a classifier-declined request is re-run on the
@@ -97,12 +99,12 @@ def _client() -> anthropic.Anthropic:
     return anthropic.Anthropic(timeout=REQUEST_TIMEOUT)
 
 
-def _call(content: list[dict], output_format: type[BaseModel] | None = None):
+def _call(content: list[dict], output_format: type[BaseModel] | None = None, effort: str = EFFORT):
     """Send one user turn; returns the parsed model when output_format is set, else the text."""
     params = dict(
         model=db.get_setting("model"),
         max_tokens=MAX_TOKENS,
-        output_config={"effort": EFFORT},
+        output_config={"effort": effort},
         betas=[FALLBACK_BETA],
         fallbacks="default",
         messages=[{"role": "user", "content": content}],
@@ -288,7 +290,7 @@ def check_food(image_rel_path: str) -> dict:
 今天已摄入合计(JSON):{json.dumps(totals, ensure_ascii=False)}
 
 估算这份食物的营养成分(填 meal),结合今天剩余额度、当前时间和用户目标,给出 verdict 和 advice。"""
-    result = _call([_image_block(image_rel_path), _text_block([prompt])], FoodCheck)
+    result = _call([_image_block(image_rel_path), _text_block([prompt])], FoodCheck, effort=CHECK_EFFORT)
     return {
         "verdict": result.verdict,
         "advice": result.advice.strip(),
