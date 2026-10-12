@@ -4,6 +4,7 @@ import logging
 import re
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
@@ -120,7 +121,7 @@ async def upload(
 
     image_path = await save_upload(store, image) if image is not None else None
 
-    meal_id = store.insert_meal(db.now_iso(), text, image_path)
+    meal_id = store.insert_meal(store.now_iso(), text, image_path)
     worker.enqueue_meal(store, meal_id)
     return {"type": "meal", "id": meal_id, "status": "pending"}
 
@@ -285,7 +286,7 @@ def calendar_month(ym: str, store: Store = Depends(current_store)):
 @router.get("/api/trends")
 def trends(days: int = 30, store: Store = Depends(current_store)):
     days = max(1, min(days, 365))
-    end = date.today()
+    end = store.today()
     start = end - timedelta(days=days - 1)
     return {
         "start": start.isoformat(),
@@ -300,7 +301,7 @@ def trends(days: int = 30, store: Store = Depends(current_store)):
 
 @router.get("/api/weights")
 def get_weights(days: int = 90, store: Store = Depends(current_store)):
-    start = date.today() - timedelta(days=max(1, min(days, 3650)) - 1)
+    start = store.today() - timedelta(days=max(1, min(days, 3650)) - 1)
     return store.list_weights(start.isoformat())
 
 
@@ -310,7 +311,7 @@ def add_weight(body: dict, store: Store = Depends(current_store)):
         kg = float(body["weight_kg"])
     except (KeyError, TypeError, ValueError):
         raise HTTPException(400, "weight_kg must be a number")
-    measured_at = body.get("measured_at") or db.now_iso()
+    measured_at = body.get("measured_at") or store.now_iso()
     weight_id = store.insert_weight(kg, measured_at)
     return {"id": weight_id, "weight_kg": kg, "measured_at": measured_at}
 
@@ -356,6 +357,12 @@ def put_settings(values: dict, store: Store = Depends(current_store)):
             raise HTTPException(400, "model must be a model name like claude-opus-5-5, or empty for the default")
     if "advice_time" in values and not re.fullmatch(r"\d{2}:\d{2}", str(values["advice_time"])):
         raise HTTPException(400, "advice_time must look like 23:00")
+    if "timezone" in values:
+        values["timezone"] = str(values["timezone"]).strip()
+        try:
+            ZoneInfo(values["timezone"])
+        except (ValueError, ZoneInfoNotFoundError):
+            raise HTTPException(400, "timezone must be an IANA name like Europe/London")
     if "meal_slots" in values:
         try:
             slots = values["meal_slots"]

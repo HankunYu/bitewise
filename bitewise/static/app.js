@@ -866,6 +866,7 @@ async function loadSettings() {
   $("#model-provider").textContent = me.provider;
   $("#set-target").value = s.daily_kcal_target;
   $("#set-goal").value = s.goal_prompt;
+  renderTimezoneOptions(s.timezone);
   $("#set-advice-time").value = s.advice_time;
   $("#set-model").value = s.model;
   let slots = {};
@@ -884,6 +885,15 @@ async function loadSettings() {
     setTargetsBusy(true);
     pollTargetsJob();
   }
+}
+
+function renderTimezoneOptions(current) {
+  const zones = Intl.supportedValuesOf("timeZone");
+  // The saved zone may be an alias the browser does not list; keep it selectable.
+  if (!zones.includes(current)) zones.unshift(current);
+  const select = $("#set-timezone");
+  select.innerHTML = zones.map((z) => `<option value="${z}">${z}</option>`).join("");
+  select.value = current;
 }
 
 function renderNutrientInputs(targetsJson) {
@@ -961,6 +971,7 @@ $("#settings-save").addEventListener("click", async () => {
     await apiJSON("/api/settings", "PUT", {
       daily_kcal_target: $("#set-target").value,
       goal_prompt: $("#set-goal").value,
+      timezone: $("#set-timezone").value,
       advice_time: $("#set-advice-time").value,
       model: $("#set-model").value,
       meal_slots: slots,

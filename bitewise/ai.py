@@ -160,7 +160,7 @@ def interpret_text(store: Store, text: str) -> dict:
         }
         for m in recent
     ]
-    now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
+    now = store.now().strftime("%Y-%m-%d %H:%M (%A)")
     prompt = f"""你是饮食记录工具的解析器。用户从手机发来一条消息,可能是:记录一顿饭、修改已有记录、删除记录、记录体重。
 
 当前时间:{now}
@@ -211,7 +211,7 @@ def check_food(store: Store, image_rel_path: str) -> dict:
     Returns {"verdict", "advice", "estimate"}; estimate has the meal shape so an
     eaten check can be stored as a meal without another model call.
     """
-    today = datetime.now().date().isoformat()
+    today = store.today().isoformat()
     meals = [m for m in store.list_meals(f"{today}T00:00:00", f"{today}T23:59:59")
              if m["status"] == "done"]
     meals_brief = [
@@ -227,7 +227,7 @@ def check_food(store: Store, image_rel_path: str) -> dict:
         f"每日营养目标(蛋白质/纤维为下限,其余为上限,JSON):{json.dumps(targets, ensure_ascii=False)}\n"
         if targets else ""
     )
-    now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
+    now = store.now().strftime("%Y-%m-%d %H:%M (%A)")
     prompt = f"""你是一位营养师。用户还没吃,拍了上面这张食物照片问你:这个能不能吃、吃了会怎样。
 
 当前时间:{now}

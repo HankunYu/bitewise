@@ -1,8 +1,6 @@
 import logging
 import threading
 import time
-from datetime import date, datetime
-
 from . import users, worker
 from .db import Store
 
@@ -25,9 +23,10 @@ def _run() -> None:
 
 def _tick(store: Store) -> None:
     advice_time = store.get_setting("advice_time")
-    if datetime.now().strftime("%H:%M") < advice_time:
+    now = store.now()
+    if now.strftime("%H:%M") < advice_time:
         return
-    today = date.today().isoformat()
+    today = now.date().isoformat()
     if store.get_advice(today) is not None:
         return
     if not store.day_has_done_meals(today):

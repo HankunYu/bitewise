@@ -28,6 +28,8 @@ DEFAULT_SETTINGS = {
     "daily_kcal_target": "2000",
     "goal_prompt": "",
     "advice_time": "23:00",
+    # IANA name; "now", "today", meal slots and advice_time all follow it.
+    "timezone": "Europe/London",
     # Empty = the provider's default model.
     "model": "",
     "meal_slots": '{"breakfast": ["05:00", "10:30"], "lunch": ["10:30", "15:00"], "dinner": ["17:00", "22:00"]}',

@@ -6,7 +6,6 @@ from fastapi.routing import APIRoute
 
 from bitewise import auth, config, users
 from bitewise.app import app
-from bitewise.db import now_iso
 
 from .conftest import ALICE_TOKEN, BOB_TOKEN, bearer
 
@@ -106,7 +105,7 @@ def test_weights_are_per_user(client):
 
 
 def test_meals_of_other_users_are_not_found(client):
-    meal_id = store_of("alice").insert_meal(now_iso(), "test", None)
+    meal_id = store_of("alice").insert_meal(store_of("alice").now_iso(), "test", None)
     headers = bearer(BOB_TOKEN)
     assert client.patch(f"/api/meals/{meal_id}", json={"kcal": 1}, headers=headers).status_code == 404
     assert client.delete(f"/api/meals/{meal_id}", headers=headers).status_code == 404

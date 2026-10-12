@@ -1,8 +1,9 @@
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, time as dtime
+from datetime import date, datetime, time as dtime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from . import config
 
@@ -69,10 +70,6 @@ MEAL_EDITABLE_FIELDS = {
     "eaten_at", "meal_slot", "description", "items",
     "kcal", *config.NUTRIENT_KEYS, "comment",
 }
-
-
-def now_iso() -> str:
-    return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -198,11 +195,26 @@ class Store:
                 return name
         return "snack"
 
+    # ---------- clock ----------
+
+    def timezone(self) -> ZoneInfo:
+        return ZoneInfo(self.get_setting("timezone"))
+
+    def now(self) -> datetime:
+        """Current wall-clock time in the user's timezone, naive like every stored timestamp."""
+        return datetime.now(self.timezone()).replace(tzinfo=None)
+
+    def now_iso(self) -> str:
+        return self.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+    def today(self) -> date:
+        return self.now().date()
+
     # ---------- meals ----------
 
     def insert_meal(self, eaten_at: str, source_text: str, image_path: str | None) -> int:
         dt = datetime.fromisoformat(eaten_at)
-        now = now_iso()
+        now = self.now_iso()
         with self._conn() as conn:
             cur = conn.execute(
                 "INSERT INTO meals (eaten_at, meal_slot, source_text, image_path, status, created_at, updated_at) "
@@ -220,7 +232,7 @@ class Store:
         fields = dict(fields)
         if "items" in fields and not isinstance(fields["items"], str):
             fields["items"] = json.dumps(fields["items"], ensure_ascii=False)
-        fields["updated_at"] = now_iso()
+        fields["updated_at"] = self.now_iso()
         columns = ", ".join(f"{k} = ?" for k in fields)
         with self._conn() as conn:
             conn.execute(
@@ -283,7 +295,7 @@ class Store:
         with self._conn() as conn:
             cur = conn.execute(
                 "INSERT INTO weights (measured_at, weight_kg) VALUES (?, ?)",
-                (measured_at or now_iso(), weight_kg),
+                (measured_at or self.now_iso(), weight_kg),
             )
             return cur.lastrowid
 
@@ -317,7 +329,7 @@ class Store:
             conn.execute(
                 "INSERT INTO daily_advice (date, advice, status, generated_at) VALUES (?, '', 'pending', ?) "
                 "ON CONFLICT(date) DO UPDATE SET status = 'pending', error = NULL",
-                (date, now_iso()),
+                (date, self.now_iso()),
             )
 
     def update_advice(self, date: str, fields: dict) -> None:
@@ -335,7 +347,7 @@ class Store:
                 "VALUES (?, ?, 'done', NULL, ?) "
                 "ON CONFLICT(date) DO UPDATE SET advice = excluded.advice, status = 'done', error = NULL, "
                 "generated_at = excluded.generated_at",
-                (date, advice, now_iso()),
+                (date, advice, self.now_iso()),
             )
 
     def unfinished_advice_dates(self) -> list[str]:
@@ -349,7 +361,7 @@ class Store:
     # ---------- food checks ----------
 
     def insert_check(self, image_path: str) -> int:
-        now = now_iso()
+        now = self.now_iso()
         with self._conn() as conn:
             cur = conn.execute(
                 "INSERT INTO food_checks (image_path, status, created_at, updated_at) "
@@ -367,7 +379,7 @@ class Store:
         fields = dict(fields)
         if "estimate" in fields and not isinstance(fields["estimate"], str):
             fields["estimate"] = json.dumps(fields["estimate"], ensure_ascii=False)
-        fields["updated_at"] = now_iso()
+        fields["updated_at"] = self.now_iso()
         columns = ", ".join(f"{k} = ?" for k in fields)
         with self._conn() as conn:
             conn.execute(
@@ -390,7 +402,7 @@ class Store:
         the check and inserting the meal share one transaction, so a double tap
         cannot log the meal twice.
         """
-        eaten_at = now_iso()
+        eaten_at = self.now_iso()
         slot = self.slot_for(datetime.fromisoformat(eaten_at))
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
