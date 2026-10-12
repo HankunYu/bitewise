@@ -1,74 +1,79 @@
 # bitewise
 
-个人饮食记录工具:手机拍照/发文字 → 大模型(Claude / GPT / Gemini 任选)估算卡路里和三大营养素 → 网页 Dashboard 查看汇总、趋势和建议。一个服务可供多人使用,每人一个访问令牌,数据互相隔离。
+English | [简体中文](README.zh-CN.md)
 
-![bitewise 截图:今日、日历、趋势](docs/screenshot.png)
+A personal food log: snap a photo or send a line of text from your phone → an LLM (Claude, GPT or Gemini, your pick) estimates calories and macros → a web dashboard shows totals, trends and advice. One server can host several people; each gets their own access token and their data stays separate.
 
-## 工作方式
+The web UI, the AI prompts and the AI's replies are in Chinese.
+
+![bitewise screenshots: today, calendar, trends](docs/screenshot.png)
+
+## How it works
 
 ```
-iPhone 快捷指令 ──HTTPS + Bearer token──▶ 反向代理(TLS) ──▶ FastAPI 服务(127.0.0.1)
-浏览器 ─────────HTTPS + 登录 cookie─────┘                     ├─ token 决定用户,读写 data/<用户名>/
-                                                              ├─ 立即入库返回,后台队列调模型 API 识别
-                                                              ├─ 文字输入由 AI 判断意图:记饭 / 修正记录 / 记体重
-                                                              ├─ 每晚按各用户设置生成当日总结建议
-                                                              └─ 网页 Dashboard(今日 / 日历 / 趋势 / 设置)
+iPhone Shortcuts ──HTTPS + Bearer token──▶ reverse proxy (TLS) ──▶ FastAPI server (127.0.0.1)
+Browser ──────────HTTPS + login cookie───┘                          ├─ token picks the user, reads/writes data/<user>/
+                                                                    ├─ saves right away, a background queue calls the model API
+                                                                    ├─ text input: AI decides between log meal / fix a record / log weight
+                                                                    ├─ nightly daily summary and advice, per user schedule
+                                                                    └─ web dashboard (today / calendar / trends / settings)
 ```
 
-- 每顿饭记录:描述、食物明细、卡路里、蛋白质/碳水/脂肪、一句 AI 点评
-- 餐次按上传时间自动划分(早/午/晚/加餐),边界可在设置中调整
-- 「我的目标」自由文本会注入每次 AI 调用,影响点评与建议口径
-- 模型厂商可选 Anthropic(默认)/ OpenAI / Google,所有用户共用 `.env` 里的 API key,每人可在设置里改用的模型
+- Each meal records a description, item breakdown, calories, protein/carbs/fat, and a one-line AI comment
+- Meals are sorted into breakfast / lunch / dinner / snack by upload time; the boundaries are adjustable in settings
+- Every time and date (upload time, meal slots, "today", the nightly advice) follows each user's timezone setting (default `Europe/London`), not the server's clock
+- A free-text "my goal" is injected into every AI call and shapes the comments and advice
+- Model provider: Anthropic (default), OpenAI or Google. All users share the API key in `.env`; each user can pick a different model in settings
 
-## 运行
+## Running
 
-前置要求:Python ≥ 3.12、[uv](https://docs.astral.sh/uv/)、所选厂商的 API key(所用模型需支持图片输入)。
+Requirements: Python ≥ 3.12, [uv](https://docs.astral.sh/uv/), and an API key for your provider (the model must accept image input).
 
 ```bash
 uv sync
-cp .env.example .env                        # 选厂商并填入对应的 API key
-.venv/bin/python -m bitewise add-user alice # 生成令牌并打印一次,记下来
-.venv/bin/python -m bitewise                # 默认监听 127.0.0.1:8600
+cp .env.example .env                        # pick a provider and fill in its API key
+.venv/bin/python -m bitewise add-user alice # creates a token and prints it once, save it
+.venv/bin/python -m bitewise                # listens on 127.0.0.1:8600 by default
 ```
 
-- `.env`:模型厂商和 API key(见下方「模型」),以及可选的 `BITEWISE_HOST` / `BITEWISE_PORT`。默认只监听本机,公网访问走反向代理;只在可信内网直连时才设 `BITEWISE_HOST=0.0.0.0`。
-- `users.toml`:用户名 → 令牌,由 `add-user` 维护(权限 600)。没有用户时服务拒绝启动。新增用户后重启服务生效。
-- `data/<用户名>/`:各用户的 SQLite 和上传原图。根目录可用 `BITEWISE_DATA` 改。
+- `.env`: model provider and API key (see [Models](#models)), plus optional `BITEWISE_HOST` / `BITEWISE_PORT`. It only listens on localhost by default and public access goes through a reverse proxy; set `BITEWISE_HOST=0.0.0.0` only for direct access on a trusted LAN.
+- `users.toml`: user name → token, maintained by `add-user` (mode 600). The server refuses to start without users. Restart the server after adding a user.
+- `data/<user>/`: each user's SQLite database and original photos. Change the root with `BITEWISE_DATA`.
 
-`.env`、`users.toml`、`data/` 都已 gitignore。
+`.env`, `users.toml` and `data/` are all gitignored.
 
-### 模型
+### Models
 
-`.env` 里的 `BITEWISE_PROVIDER` 选厂商,全服务统一;改完重启服务。
+`BITEWISE_PROVIDER` in `.env` picks the provider for the whole server; restart after changing it.
 
-| `BITEWISE_PROVIDER` | API key 变量 | 默认模型 |
+| `BITEWISE_PROVIDER` | API key variable | Default model |
 |---|---|---|
-| `anthropic`(默认) | `ANTHROPIC_API_KEY` | `claude-opus-5-5` |
+| `anthropic` (default) | `ANTHROPIC_API_KEY` | `claude-opus-5-5` |
 | `openai` | `OPENAI_API_KEY` | `gpt-5.5` |
-| `google` | `GEMINI_API_KEY` | `gemini-3.8-flash`(走 Gemini 的 OpenAI 兼容接口) |
+| `google` | `GEMINI_API_KEY` | `gemini-3.8-flash` (via Gemini's OpenAI-compatible endpoint) |
 
-每个用户可在「设置 → 模型」里填别的模型名,留空用默认。模型要能看图(拍照记饭、能吃吗)、支持结构化输出和推理强度(`reasoning_effort`)。Anthropic 下额外启用了服务端拒答回退,其他厂商没有这一项。
+Each user can enter another model name under Settings → Model; leave it empty to use the default. The model needs image input (meal photos, "can I eat this?"), structured outputs and reasoning effort (`reasoning_effort`). With Anthropic, server-side fallback on refusals is also enabled; other providers don't have it.
 
-### 认证
+### Authentication
 
-除登录页和静态资源外,所有接口和页面都要认证:
+Every page and endpoint except the login page and static assets requires authentication:
 
-- 快捷指令:请求头 `Authorization: Bearer <令牌>`
-- 浏览器:打开网站会跳到登录页,输入令牌后写入 HttpOnly cookie(HTTPS 下带 `Secure`,有效期一年)
+- Shortcuts: request header `Authorization: Bearer <token>`
+- Browser: the site redirects to a login page; the token you enter is stored in an HttpOnly cookie (`Secure` over HTTPS, valid for one year)
 
-未认证的接口请求返回 401,页面请求跳转 `/login`。
+Unauthenticated API requests get 401; page requests redirect to `/login`.
 
-### systemd 常驻
+### Running under systemd
 
-`systemd/bitewise.service` 里的仓库路径是占位符,由 `systemd/install.sh` 按仓库实际位置渲染后装到 `~/.config/systemd/user/`,仓库放在哪都行;移动仓库后重跑一次即可。
+The repo path in `systemd/bitewise.service` is a placeholder. `systemd/install.sh` fills in the repo's actual location and installs the unit into `~/.config/systemd/user/`, so the repo can live anywhere; rerun it after moving the repo.
 
 ```bash
-./systemd/install.sh                        # 首次及移动仓库后执行
-loginctl enable-linger "$USER"              # 开机免登录自启
+./systemd/install.sh                        # first time, and after moving the repo
+loginctl enable-linger "$USER"              # start at boot without logging in
 systemctl --user enable --now bitewise
 ```
 
-### HTTPS 反向代理(nginx 示例)
+### HTTPS reverse proxy (nginx example)
 
 ```nginx
 server {
@@ -90,46 +95,46 @@ server {
 }
 ```
 
-然后 `certbot --nginx -d bitewise.example.com --redirect` 签证书并强制 HTTPS。`X-Forwarded-Proto` 不能省:服务据此判断是否给 cookie 加 `Secure`。
+Then run `certbot --nginx -d bitewise.example.com --redirect` to get a certificate and force HTTPS. Keep `X-Forwarded-Proto`: the server uses it to decide whether the cookie gets `Secure`.
 
-## 手机端
+## On the phone
 
-见 [docs/shortcut.md](docs/shortcut.md):三个快捷指令——拍照记饭、文字记录/修正/体重(都打 `/api/upload`),以及吃之前问「能吃吗」(`/api/checks`)。
+See [docs/shortcut.md](docs/shortcut.md) (in Chinese): three iPhone Shortcuts — log a meal from a photo, log text / fix a record / log weight (both hit `/api/upload`), and ask "can I eat this?" before eating (`/api/checks`).
 
-## API 摘要
+## API summary
 
-除标注「公开」的以外都需要认证,数据均为当前用户的。
+Everything except the endpoints marked "public" requires authentication and works on the current user's data.
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Description |
 |---|---|---|
-| POST | `/api/session` | 公开。JSON `{"token": ...}`,验证后写登录 cookie |
-| DELETE | `/api/session` | 公开。退出登录,清除 cookie |
-| GET | `/api/me` | 当前用户名 |
-| POST | `/api/upload` | multipart:`image`(可选)+ `text`(可选) |
-| GET | `/api/day/{date}` | 某日记录、汇总、建议、体重 |
-| PATCH / DELETE | `/api/meals/{id}` | 编辑 / 删除记录 |
-| POST | `/api/meals/{id}/retry` | 重试识别失败的记录 |
-| GET | `/api/trends?days=30` | 每日汇总 + 体重序列 |
-| GET / POST / DELETE | `/api/weights` | 体重记录 |
-| POST | `/api/advice/{date}/generate` | (重新)生成当日建议 |
-| GET / PUT | `/api/settings` | 目标、提示词、餐次边界等 |
-| POST | `/api/checks` | 「能吃吗」咨询:multipart `image`,异步分析 |
-| GET | `/api/checks/{id}` | 咨询结果(含快捷指令直接显示的 `summary`) |
-| POST | `/api/checks/{id}/eat` | 把咨询记成一顿饭 |
+| POST | `/api/session` | Public. JSON `{"token": ...}`; sets the login cookie if valid |
+| DELETE | `/api/session` | Public. Logs out and clears the cookie |
+| GET | `/api/me` | Current user, provider and default model |
+| POST | `/api/upload` | multipart: `image` (optional) + `text` (optional) |
+| GET | `/api/day/{date}` | A day's meals, totals, advice and weight |
+| PATCH / DELETE | `/api/meals/{id}` | Edit / delete a meal |
+| POST | `/api/meals/{id}/retry` | Retry a meal whose recognition failed |
+| GET | `/api/trends?days=30` | Daily totals + weight series |
+| GET / POST / DELETE | `/api/weights` | Weight entries |
+| POST | `/api/advice/{date}/generate` | (Re)generate a day's advice |
+| GET / PUT | `/api/settings` | Targets, goal prompt, meal boundaries, etc. |
+| POST | `/api/checks` | "Can I eat this?": multipart `image`, analyzed asynchronously |
+| GET | `/api/checks/{id}` | Check result (including the `summary` the shortcut shows directly) |
+| POST | `/api/checks/{id}/eat` | Turn a check into a logged meal |
 
-## 隐私
+## Privacy
 
-- 饭菜照片、文字描述,以及生成建议时用到的近期饮食和体重记录,会发送给所选厂商(Anthropic / OpenAI / Google)的 API 处理,适用该厂商的数据政策。
-- 其余数据(SQLite、原图、令牌)都只存在你自己的服务器上;项目本身不收集、不上报任何信息。
+- Meal photos, text descriptions, and the recent meals and weights used for advice are sent to your chosen provider's API (Anthropic / OpenAI / Google) and fall under that provider's data policy.
+- Everything else (SQLite, original photos, tokens) stays on your own server; the project itself collects and reports nothing.
 
-## 开发
+## Development
 
 ```bash
 uv run pytest
 ```
 
-测试会检查除公开白名单外的每个路由都挂了认证依赖,新增接口忘了挂会直接失败。
+A test checks that every route outside the public allowlist has the authentication dependency, so a new endpoint without it fails the suite.
 
-## 许可证
+## License
 
-MIT,见 [LICENSE](LICENSE)。
+MIT, see [LICENSE](LICENSE).
