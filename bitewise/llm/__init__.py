@@ -1,8 +1,9 @@
 """Provider-neutral model interface used by ai.py.
 
 ai.py builds prompts from Text/Image parts and asks the configured provider
-for either structured output (a pydantic model) or plain text. Each provider
-translates the parts into its own API format.
+for either structured output (a pydantic model) or plain text; conversations
+go through chat() as a system prompt plus alternating Turns. Each provider
+translates these into its own API format.
 """
 
 import functools
@@ -38,6 +39,13 @@ class Image:
 Part = Text | Image
 
 
+@dataclass(frozen=True)
+class Turn:
+    """One message of a conversation."""
+    role: Literal["user", "assistant"]
+    text: str
+
+
 class Provider(Protocol):
     name: str
     default_model: str
@@ -48,6 +56,10 @@ class Provider(Protocol):
 
     def text(self, model: str, parts: list[Part], effort: Effort) -> str:
         """One user turn answered as plain text."""
+        ...
+
+    def chat(self, model: str, system: str, turns: list[Turn], effort: Effort) -> str:
+        """A conversation ending on a user turn, answered as plain text."""
         ...
 
 

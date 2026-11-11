@@ -12,7 +12,7 @@ from .db import Store
 logger = logging.getLogger("bitewise.worker")
 
 # Jobs are (store, kind, key), e.g. (store, "meal", meal_id), (store, "advice", date),
-# (store, "targets", "") or (store, "check", check_id). Each kind runs on a lane
+# (store, "targets", ""), (store, "check", check_id) or (store, "chat", message_id). Each kind runs on a lane
 # (one queue + one thread) shared by all users: lanes run in parallel, jobs
 # within a lane run in order.
 
@@ -40,6 +40,10 @@ def enqueue_check(store: Store, check_id: int) -> None:
     _enqueue(store, "check", check_id)
 
 
+def enqueue_chat(store: Store, message_id: int) -> None:
+    _enqueue(store, "chat", message_id)
+
+
 def _enqueue(store: Store, kind: str, key: int | str) -> None:
     _lanes[_JOB_TYPES[kind].lane].put((store, kind, key))
 
@@ -55,6 +59,8 @@ def start() -> None:
             enqueue_targets(store)
         for check_id in store.unfinished_check_ids():
             enqueue_check(store, check_id)
+        for message_id in store.unfinished_chat_ids():
+            enqueue_chat(store, message_id)
     for name, lane in _lanes.items():
         threading.Thread(target=_run, args=(lane,), daemon=True, name=f"bitewise-worker-{name}").start()
 
@@ -175,8 +181,20 @@ def _process_check(store: Store, check_id: int) -> None:
                 store.user, check_id, result["verdict"], result["estimate"]["kcal"])
 
 
+def _process_chat(store: Store, message_id: int) -> None:
+    message = store.get_chat_message(message_id)
+    # A missing row means the conversation was cleared while the job was queued.
+    if message is None or message["status"] == "done":
+        return
+    store.update_chat_message(message_id, {"status": "processing", "error": None})
+    reply = ai.chat_reply(store, message_id)
+    store.update_chat_message(message_id, {"content": reply, "status": "done"})
+    logger.info("[%s] chat %s done (%d chars)", store.user, message_id, len(reply))
+
+
 # Meal, advice and targets share the main lane: advice and targets read what
-# meal jobs write. Checks are independent and interactive, so they get their own.
+# meal jobs write. Checks and chat are independent and interactive, so each
+# gets its own lane.
 _JOB_TYPES = {
     "meal": _JobType(
         _process_meal,
@@ -194,6 +212,10 @@ _JOB_TYPES = {
         _process_check,
         lambda store, key, error: store.update_check(key, {"status": "failed", "error": error}),
         "check"),
+    "chat": _JobType(
+        _process_chat,
+        lambda store, key, error: store.update_chat_message(key, {"status": "failed", "error": error}),
+        "chat"),
 }
 _lanes: dict[str, queue.Queue[tuple[Store, str, int | str]]] = {
     lane: queue.Queue() for lane in dict.fromkeys(job.lane for job in _JOB_TYPES.values())

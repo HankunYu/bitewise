@@ -16,12 +16,13 @@ Browser ──────────HTTPS + login cookie───┘          
                                                                     ├─ saves right away, a background queue calls the model API
                                                                     ├─ text input: AI decides between log meal / fix a record / log weight
                                                                     ├─ nightly daily summary and advice, per user schedule
-                                                                    └─ web dashboard (today / calendar / trends / settings)
+                                                                    └─ web dashboard (today / chat / calendar / trends / settings)
 ```
 
 - Each meal records a description, item breakdown, calories, protein/carbs/fat, and a one-line AI comment
 - Meals are sorted into breakfast / lunch / dinner / snack by upload time; the boundaries are adjustable in settings
 - Every time and date (upload time, meal slots, "today", the nightly advice) follows each user's timezone setting (default `Europe/London`), not the server's clock
+- A chat tab answers questions like "what can I still eat today?" or "what should I have for lunch?" from your targets, today's meals and recent trends; it only advises and never changes your records
 - A free-text "my goal" is injected into every AI call and shapes the comments and advice
 - Model provider: Anthropic (default), OpenAI or Google. All users share the API key in `.env`; each user can pick a different model in settings
 
@@ -121,10 +122,13 @@ Everything except the endpoints marked "public" requires authentication and work
 | POST | `/api/checks` | "Can I eat this?": multipart `image`, analyzed asynchronously |
 | GET | `/api/checks/{id}` | Check result (including the `summary` the shortcut shows directly) |
 | POST | `/api/checks/{id}/eat` | Turn a check into a logged meal |
+| GET / DELETE | `/api/chat` | The conversation with the AI / clear it |
+| POST | `/api/chat` | Ask a question: JSON `{"text": ...}`, answered asynchronously from your targets, today's meals and recent trends |
+| POST | `/api/chat/{id}/retry` | Retry a reply that failed |
 
 ## Privacy
 
-- Meal photos, text descriptions, and the recent meals and weights used for advice are sent to your chosen provider's API (Anthropic / OpenAI / Google) and fall under that provider's data policy.
+- Meal photos, text descriptions, chat messages, and the recent meals and weights used for advice and chat answers are sent to your chosen provider's API (Anthropic / OpenAI / Google) and fall under that provider's data policy.
 - Everything else (SQLite, original photos, tokens) stays on your own server; the project itself collects and reports nothing.
 
 ## Development

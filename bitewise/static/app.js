@@ -22,6 +22,7 @@ const state = {
   date: todayStr(),
   rangeDays: 30,
   pollTimer: null,
+  chatTimer: null,
   trendData: null,
   calMonth: todayStr().slice(0, 7),
   calSelected: null,
@@ -69,10 +70,12 @@ function switchView(view) {
   state.view = view;
   document.querySelectorAll("nav button").forEach((b) =>
     b.classList.toggle("active", b.dataset.view === view));
-  ["today", "calendar", "trends", "settings"].forEach((v) => {
+  ["today", "chat", "calendar", "trends", "settings"].forEach((v) => {
     $(`#view-${v}`).hidden = v !== view;
   });
+  clearTimeout(state.chatTimer);
   if (view === "today") loadDay();
+  if (view === "chat") loadChat(true);
   if (view === "calendar") loadCalendar();
   if (view === "trends") loadTrends();
   if (view === "settings") loadSettings();
@@ -347,6 +350,135 @@ function showEditForm(container, meal) {
   });
   container.appendChild(form);
 }
+
+// ---------------- chat view ----------------
+
+const CHAT_SUGGESTIONS = [
+  "今天剩下的热量还可以吃什么?",
+  "下一餐吃什么比较好?",
+  "今天吃得怎么样?",
+  "这周吃得怎么样?",
+];
+const CHAT_POLL_MS = 1500;
+
+function chatBusy(messages) {
+  return messages.some((m) => m.status === "pending" || m.status === "processing");
+}
+
+// scroll: jump to the newest message after rendering (on entering the view or
+// sending); background polls only follow the conversation when a reply lands.
+async function loadChat(scroll) {
+  clearTimeout(state.chatTimer);
+  let messages;
+  try {
+    messages = (await api("/api/chat")).messages;
+  } catch (err) {
+    $("#chat-note").textContent = `加载失败:${err.message}`;
+    return;
+  }
+  const wasBusy = !!$("#chat-messages .chat-msg.busy");
+  renderChat(messages);
+  const busy = chatBusy(messages);
+  if (scroll || (wasBusy && !busy)) scrollChatToEnd();
+  if (busy && state.view === "chat") {
+    state.chatTimer = setTimeout(() => loadChat(false), CHAT_POLL_MS);
+  }
+}
+
+function renderChat(messages) {
+  const box = $("#chat-messages");
+  const busy = chatBusy(messages);
+  $("#chat-clear").hidden = !messages.length;
+  $("#chat-send").disabled = busy;
+  if (!messages.length) {
+    box.innerHTML = `<div class="chat-empty">可以结合你的饮食记录、目标和体重来回答,试试:</div>
+      <div class="chat-suggestions">${CHAT_SUGGESTIONS.map((q) =>
+        `<button type="button" class="ghost">${escapeHtml(q)}</button>`).join("")}</div>`;
+    box.querySelectorAll(".chat-suggestions button").forEach((btn) => {
+      btn.addEventListener("click", () => sendChat(btn.textContent));
+    });
+    return;
+  }
+  box.innerHTML = messages.map(chatMessageHtml).join("");
+  box.querySelectorAll("[data-retry]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        await apiJSON(`/api/chat/${btn.dataset.retry}/retry`, "POST", {});
+      } catch (err) {
+        $("#chat-note").textContent = `重试失败:${err.message}`;
+      }
+      loadChat(false);
+    });
+  });
+}
+
+function chatMessageHtml(m) {
+  if (m.role === "user") {
+    return `<div class="chat-msg user">${escapeHtml(m.content)}</div>`;
+  }
+  if (m.status === "failed") {
+    return `<div class="chat-msg assistant failed">回答失败:${escapeHtml(m.error || "未知错误")}
+      <button class="link-btn" data-retry="${m.id}">重试</button></div>`;
+  }
+  if (m.status !== "done") {
+    return `<div class="chat-msg assistant busy">思考中…</div>`;
+  }
+  return `<div class="chat-msg assistant">${escapeHtml(m.content)}</div>`;
+}
+
+function scrollChatToEnd() {
+  window.scrollTo({ top: document.documentElement.scrollHeight });
+}
+
+async function sendChat(text) {
+  text = text.trim();
+  const send = $("#chat-send");
+  if (!text || send.disabled) return;
+  send.disabled = true;
+  $("#chat-note").textContent = "";
+  try {
+    await apiJSON("/api/chat", "POST", { text });
+  } catch (err) {
+    $("#chat-note").textContent = `发送失败:${err.message}`;
+    send.disabled = false;
+    return;
+  }
+  const input = $("#chat-input");
+  input.value = "";
+  resizeChatInput();
+  loadChat(true);
+}
+
+function resizeChatInput() {
+  const input = $("#chat-input");
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, 140)}px`;
+}
+
+$("#chat-form").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  sendChat($("#chat-input").value);
+});
+$("#chat-input").addEventListener("input", resizeChatInput);
+$("#chat-input").addEventListener("keydown", (ev) => {
+  // Enter sends, Shift+Enter breaks the line; Enter that confirms an IME
+  // candidate (Chinese input) must not send.
+  if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {
+    ev.preventDefault();
+    sendChat($("#chat-input").value);
+  }
+});
+$("#chat-clear").addEventListener("click", async () => {
+  if (!confirm("清空当前对话,开始新对话?")) return;
+  try {
+    await api("/api/chat", { method: "DELETE" });
+  } catch (err) {
+    $("#chat-note").textContent = `清空失败:${err.message}`;
+    return;
+  }
+  loadChat(false);
+});
 
 // ---------------- calendar view ----------------
 
@@ -1022,9 +1154,10 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () 
 // Refresh immediately when the page returns to the foreground (e.g. after
 // logging a meal from the shortcut and switching back).
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && state.view === "today" && !$(".edit-form")) {
-    loadDay();
-  }
+  if (document.visibilityState !== "visible") return;
+  if (state.view === "today" && !$(".edit-form")) loadDay();
+  // A reply may have finished while the page was in the background.
+  if (state.view === "chat") loadChat(false);
 });
 
 // boot

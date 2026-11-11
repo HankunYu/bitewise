@@ -28,6 +28,7 @@ JPEG_QUALITY = 82
 RAW_IMAGE_EXTS = {"heic", "heif", "jpg", "jpeg", "png", "webp", "gif"}
 # Sanity check for the model setting, which is sent as-is to the API.
 MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\[\]-]*")
+MAX_CHAT_TEXT = 2000
 
 
 def compress_image(raw: bytes) -> bytes:
@@ -262,6 +263,45 @@ def eat_check(check_id: int, store: Store = Depends(current_store)):
     if meal_id is None:
         raise HTTPException(409, "check already recorded as a meal")
     return store.get_meal(meal_id)
+
+
+# ---------- chat ----------
+
+@router.get("/api/chat")
+def get_chat(store: Store = Depends(current_store)):
+    return {"messages": store.list_chat_messages()}
+
+
+@router.post("/api/chat")
+def send_chat(body: dict, store: Store = Depends(current_store)):
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "need some text")
+    if len(text) > MAX_CHAT_TEXT:
+        raise HTTPException(400, f"message too long (max {MAX_CHAT_TEXT} characters)")
+    reply_id = store.insert_chat_exchange(text)
+    if reply_id is None:
+        raise HTTPException(409, "the previous reply is still being written")
+    worker.enqueue_chat(store, reply_id)
+    return {"id": reply_id, "status": "pending"}
+
+
+@router.post("/api/chat/{message_id}/retry")
+def retry_chat(message_id: int, store: Store = Depends(current_store)):
+    message = store.get_chat_message(message_id)
+    if message is None:
+        raise HTTPException(404, "message not found")
+    if message["status"] != "failed":
+        raise HTTPException(400, f"message is {message['status']}, only failed replies can be retried")
+    store.update_chat_message(message_id, {"status": "pending", "error": None})
+    worker.enqueue_chat(store, message_id)
+    return {"id": message_id, "status": "pending"}
+
+
+@router.delete("/api/chat")
+def clear_chat(store: Store = Depends(current_store)):
+    store.clear_chat()
+    return {"cleared": True}
 
 
 # ---------- calendar ----------

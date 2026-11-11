@@ -42,6 +42,10 @@ class FakeProvider:
         self.calls.append((model, parts, None, effort))
         return self.result
 
+    def chat(self, model, system, turns, effort):
+        self.calls.append((model, system, turns, effort))
+        return self.result
+
 
 # ---------- provider selection ----------
 
@@ -96,6 +100,35 @@ def test_meal_photo_is_sent_as_image_part(store, monkeypatch):
     assert image == llm.Image("image/jpeg", b"jpeg-bytes")
 
 
+def test_chat_reply_sends_user_data_and_alternating_turns(store, monkeypatch):
+    store.set_settings({"goal_prompt": "减脂", "daily_kcal_target": "1800"})
+    meal_id = store.insert_meal(store.now_iso(), "", None)
+    store.update_meal(meal_id, {"description": "牛肉面", "kcal": 650.0, "status": "done"})
+    first = store.insert_chat_exchange("今天还能吃什么?")
+    store.update_chat_message(first, {"status": "failed", "error": "boom"})
+    # The failed reply is skipped, leaving two questions in a row to merge.
+    second = store.insert_chat_exchange("晚饭呢?")
+    fake = FakeProvider("")
+    monkeypatch.setattr(llm, "provider", lambda: fake)
+    with pytest.raises(llm.AIError, match="empty reply"):
+        ai.chat_reply(store, second)
+    _, system, turns, effort = fake.calls[0]
+    assert "减脂" in system and "1800" in system and "牛肉面" in system
+    assert turns == [llm.Turn("user", "今天还能吃什么?\n\n晚饭呢?")]
+    assert effort == ai.CHAT_EFFORT
+
+
+def test_chat_turns_start_with_the_user():
+    history = [
+        {"role": "assistant", "content": "a0"},
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "q2"},
+    ]
+    assert ai._chat_turns(history) == [
+        llm.Turn("user", "q1"), llm.Turn("assistant", "a1"), llm.Turn("user", "q2")]
+
+
 @pytest.mark.parametrize("schema", [ai.MealEstimate, ai.TextAction, ai.FoodCheck, ai.NutrientTargets])
 def test_schemas_convert_to_strict_json_schema(schema):
     # OpenAI-compatible structured outputs need every schema in strict form.
@@ -143,14 +176,26 @@ def test_openai_text_and_failures():
         provider.text("m", [llm.Text("x")], "low")
 
 
+def test_openai_chat_request_shape():
+    provider, requests = _openai_with_fake_client(content=" reply ")
+    turns = [llm.Turn("user", "q1"), llm.Turn("assistant", "a1"), llm.Turn("user", "q2")]
+    assert provider.chat("gpt-x", "sys", turns, "low") == "reply"
+    assert requests[0]["messages"] == [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "q2"},
+    ]
+
+
 # ---------- Anthropic provider ----------
 
-def _anthropic_with_fake_client(stop_reason="end_turn", parsed=None):
+def _anthropic_with_fake_client(stop_reason="end_turn", parsed=None, content=()):
     requests = []
 
     def respond(**kwargs):
         requests.append(kwargs)
-        return SimpleNamespace(stop_reason=stop_reason, stop_details=None, parsed_output=parsed, content=[])
+        return SimpleNamespace(stop_reason=stop_reason, stop_details=None, parsed_output=parsed, content=list(content))
 
     provider = AnthropicProvider()
     messages = SimpleNamespace(parse=respond, create=respond)
@@ -177,3 +222,18 @@ def test_anthropic_refusal_is_an_error():
     provider, _ = _anthropic_with_fake_client(stop_reason="refusal")
     with pytest.raises(llm.AIError, match="declined"):
         provider.text("m", [llm.Text("x")], "low")
+
+
+def test_anthropic_chat_request_shape():
+    reply = [SimpleNamespace(type="thinking"), SimpleNamespace(type="text", text=" reply ")]
+    provider, requests = _anthropic_with_fake_client(content=reply)
+    turns = [llm.Turn("user", "q1"), llm.Turn("assistant", "a1"), llm.Turn("user", "q2")]
+    assert provider.chat("claude-x", "sys", turns, "low") == "reply"
+    request = requests[0]
+    assert request["system"] == "sys"
+    assert request["output_config"] == {"effort": "low"}
+    assert request["messages"] == [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "q2"},
+    ]

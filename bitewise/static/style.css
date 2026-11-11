@@ -176,6 +176,31 @@ button.ghost {
 .advice-text { white-space: pre-wrap; }
 .advice-empty { color: var(--muted); }
 
+/* ---- chat ---- */
+.chat-head { display: flex; align-items: baseline; justify-content: space-between; }
+#chat-messages { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+.chat-msg {
+  max-width: 85%; padding: 8px 12px; border-radius: 14px;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.chat-msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+.chat-msg.assistant { align-self: flex-start; background: var(--grid); border-bottom-left-radius: 4px; }
+.chat-msg.busy { color: var(--muted); }
+.chat-msg.failed { color: var(--over); font-size: 13px; }
+.chat-empty { color: var(--muted); }
+.chat-suggestions { display: flex; flex-wrap: wrap; gap: 8px; }
+.chat-suggestions button { font-size: 13px; border-radius: 999px; }
+/* Stays reachable at the bottom of the screen while the conversation scrolls. */
+.chat-composer {
+  display: flex; align-items: flex-end; gap: 8px;
+  position: sticky; bottom: 0; padding: 8px 0 calc(8px + env(safe-area-inset-bottom));
+  background: var(--surface);
+}
+.chat-composer textarea {
+  flex: 1; resize: none; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--page); color: var(--ink); font-size: 16px; font-family: inherit; line-height: 1.4;
+}
+
 /* ---- calendar ---- */
 .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
 .cal-head { text-align: center; font-size: 12px; color: var(--muted); padding: 2px 0; }
@@ -281,4 +306,7 @@ button.ghost:disabled { opacity: .5; cursor: default; }
   .nutrient-grid { grid-template-columns: repeat(2, 1fr); }
   header { gap: 8px; }
   header h1 { font-size: 16px; }
+  /* Five tabs have to fit next to the title on a phone. */
+  nav { gap: 2px; }
+  nav button { padding: 6px 7px; white-space: nowrap; }
 }

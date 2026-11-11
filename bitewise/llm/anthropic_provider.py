@@ -4,7 +4,7 @@ import os
 
 import anthropic
 
-from . import REQUEST_TIMEOUT, AIError, Effort, Image, Part, Text, TModel
+from . import REQUEST_TIMEOUT, AIError, Effort, Image, Part, Text, TModel, Turn
 
 MAX_TOKENS = 16000
 # Server-side refusal fallback: a classifier-declined request is re-run on the
@@ -27,24 +27,34 @@ class AnthropicProvider:
     def structured(self, model: str, parts: list[Part], schema: type[TModel], effort: Effort) -> TModel:
         response = self._send(
             lambda params: self._client.beta.messages.parse(**params, output_format=schema),
-            model, parts, effort,
+            model, [_user_message(parts)], effort,
         )
         if response.parsed_output is None:
             raise AIError("model returned no structured output")
         return response.parsed_output
 
     def text(self, model: str, parts: list[Part], effort: Effort) -> str:
-        response = self._send(lambda params: self._client.beta.messages.create(**params), model, parts, effort)
-        return "".join(block.text for block in response.content if block.type == "text").strip()
+        response = self._send(
+            lambda params: self._client.beta.messages.create(**params),
+            model, [_user_message(parts)], effort,
+        )
+        return _response_text(response)
 
-    def _send(self, request, model: str, parts: list[Part], effort: Effort):
+    def chat(self, model: str, system: str, turns: list[Turn], effort: Effort) -> str:
+        response = self._send(
+            lambda params: self._client.beta.messages.create(**params, system=system),
+            model, [{"role": turn.role, "content": turn.text} for turn in turns], effort,
+        )
+        return _response_text(response)
+
+    def _send(self, request, model: str, messages: list[dict], effort: Effort):
         params = dict(
             model=model,
             max_tokens=MAX_TOKENS,
             output_config={"effort": effort},
             betas=[FALLBACK_BETA],
             fallbacks="default",
-            messages=[{"role": "user", "content": [_block(part) for part in parts]}],
+            messages=messages,
         )
         try:
             response = request(params)
@@ -66,6 +76,14 @@ class AnthropicProvider:
         if response.stop_reason == "max_tokens":
             raise AIError("model response was cut off at max_tokens")
         return response
+
+
+def _user_message(parts: list[Part]) -> dict:
+    return {"role": "user", "content": [_block(part) for part in parts]}
+
+
+def _response_text(response) -> str:
+    return "".join(block.text for block in response.content if block.type == "text").strip()
 
 
 def _block(part: Part) -> dict:

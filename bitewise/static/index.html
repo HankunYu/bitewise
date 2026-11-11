@@ -16,6 +16,7 @@
   <h1><img class="logo" src="/static/icon.svg" alt="">bitewise</h1>
   <nav>
     <button data-view="today" class="active">今日</button>
+    <button data-view="chat">问问</button>
     <button data-view="calendar">日历</button>
     <button data-view="trends">趋势</button>
     <button data-view="settings">设置</button>
@@ -36,6 +37,21 @@
     <div class="card">
       <h2>饮食记录</h2>
       <div id="meals-box"></div>
+    </div>
+  </section>
+
+  <section id="view-chat" hidden>
+    <div class="card chat-card">
+      <div class="chat-head">
+        <h2>问问 AI</h2>
+        <button class="link-btn" id="chat-clear" hidden>新对话</button>
+      </div>
+      <div id="chat-messages"></div>
+      <form class="chat-composer" id="chat-form">
+        <textarea id="chat-input" rows="1" maxlength="2000" placeholder="问点什么,比如今天还能吃什么"></textarea>
+        <button class="primary" id="chat-send" type="submit">发送</button>
+      </form>
+      <div class="save-note error" id="chat-note"></div>
     </div>
   </section>
 

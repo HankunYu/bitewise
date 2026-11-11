@@ -60,6 +60,18 @@ CREATE TABLE IF NOT EXISTS food_checks (
     updated_at TEXT NOT NULL
 );
 
+-- The user's conversation with the AI. Questions are stored done; each comes
+-- with an assistant row that a worker job fills in.
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'done',
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -427,3 +439,73 @@ class Store:
                 (cur.lastrowid, eaten_at, check_id),
             )
             return cur.lastrowid
+
+    # ---------- chat ----------
+
+    def insert_chat_exchange(self, text: str) -> int | None:
+        """Store a question and the pending reply that will answer it.
+
+        Returns the reply's id, or None while an earlier reply is still being
+        written. Both checks and inserts share one transaction, so a double
+        send cannot start two replies.
+        """
+        now = self.now_iso()
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            busy = conn.execute(
+                "SELECT 1 FROM chat_messages WHERE status IN ('pending', 'processing')"
+            ).fetchone()
+            if busy:
+                return None
+            conn.execute(
+                "INSERT INTO chat_messages (role, content, status, created_at, updated_at) "
+                "VALUES ('user', ?, 'done', ?, ?)",
+                (text, now, now),
+            )
+            cur = conn.execute(
+                "INSERT INTO chat_messages (role, status, created_at, updated_at) "
+                "VALUES ('assistant', 'pending', ?, ?)",
+                (now, now),
+            )
+            return cur.lastrowid
+
+    def get_chat_message(self, message_id: int) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM chat_messages WHERE id = ?", (message_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_chat_messages(self) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute("SELECT * FROM chat_messages ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+
+    def chat_history(self, before_id: int, limit: int) -> list[dict]:
+        """The last `limit` finished messages before a reply, oldest first."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT role, content FROM chat_messages WHERE id < ? AND status = 'done' "
+                "ORDER BY id DESC LIMIT ?",
+                (before_id, limit),
+            ).fetchall()
+        return [dict(r) for r in reversed(rows)]
+
+    def update_chat_message(self, message_id: int, fields: dict) -> None:
+        fields = {**fields, "updated_at": self.now_iso()}
+        columns = ", ".join(f"{k} = ?" for k in fields)
+        with self._conn() as conn:
+            conn.execute(
+                f"UPDATE chat_messages SET {columns} WHERE id = ?",
+                (*fields.values(), message_id),
+            )
+
+    def unfinished_chat_ids(self) -> list[int]:
+        """Replies left pending/processing (e.g. after a restart)."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id FROM chat_messages WHERE status IN ('pending', 'processing') ORDER BY id"
+            ).fetchall()
+        return [r["id"] for r in rows]
+
+    def clear_chat(self) -> None:
+        with self._conn() as conn:
+            conn.execute("DELETE FROM chat_messages")

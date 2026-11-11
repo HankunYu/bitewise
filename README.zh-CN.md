@@ -14,7 +14,7 @@ iPhone 快捷指令 ──HTTPS + Bearer token──▶ 反向代理(TLS) ──
                                                               ├─ 立即入库返回,后台队列调模型 API 识别
                                                               ├─ 文字输入由 AI 判断意图:记饭 / 修正记录 / 记体重
                                                               ├─ 每晚按各用户设置生成当日总结建议
-                                                              └─ 网页 Dashboard(今日 / 日历 / 趋势 / 设置)
+                                                              └─ 网页 Dashboard(今日 / 问问 / 日历 / 趋势 / 设置)
 ```
 
 - 每顿饭记录:描述、食物明细、卡路里、蛋白质/碳水/脂肪、一句 AI 点评
@@ -119,10 +119,13 @@ server {
 | POST | `/api/checks` | 「能吃吗」咨询:multipart `image`,异步分析 |
 | GET | `/api/checks/{id}` | 咨询结果(含快捷指令直接显示的 `summary`) |
 | POST | `/api/checks/{id}/eat` | 把咨询记成一顿饭 |
+| GET / DELETE | `/api/chat` | 与 AI 的对话 / 清空对话 |
+| POST | `/api/chat` | 提问:JSON `{"text": ...}`,结合目标、今日饮食和近期趋势异步回答 |
+| POST | `/api/chat/{id}/retry` | 重试失败的回答 |
 
 ## 隐私
 
-- 饭菜照片、文字描述,以及生成建议时用到的近期饮食和体重记录,会发送给所选厂商(Anthropic / OpenAI / Google)的 API 处理,适用该厂商的数据政策。
+- 饭菜照片、文字描述、对话内容,以及生成建议和回答对话时用到的近期饮食和体重记录,会发送给所选厂商(Anthropic / OpenAI / Google)的 API 处理,适用该厂商的数据政策。
 - 其余数据(SQLite、原图、令牌)都只存在你自己的服务器上;项目本身不收集、不上报任何信息。
 
 ## 开发

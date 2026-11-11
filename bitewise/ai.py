@@ -11,6 +11,10 @@ from .llm import AIError, Effort, TModel
 EFFORT: Effort = "medium"
 # Checks are interactive (the user waits in the shortcut), so trade depth for speed.
 CHECK_EFFORT: Effort = "low"
+# Chat is interactive too: the user watches the reply come in.
+CHAT_EFFORT: Effort = "low"
+# Messages of the conversation sent along with a new question.
+CHAT_HISTORY_LIMIT = 20
 IMAGE_MEDIA_TYPES = {
     "jpeg": "image/jpeg", "jpg": "image/jpeg", "png": "image/png",
     "gif": "image/gif", "webp": "image/webp",
@@ -91,6 +95,10 @@ def _text(store: Store, parts: list[llm.Part], effort: Effort = EFFORT) -> str:
     return llm.provider().text(_model(store), parts, effort)
 
 
+def _chat(store: Store, system: str, turns: list[llm.Turn], effort: Effort = EFFORT) -> str:
+    return llm.provider().chat(_model(store), system, turns, effort)
+
+
 def _image_block(store: Store, image_rel_path: str) -> llm.Image:
     path = store.data_dir / image_rel_path
     media_type = IMAGE_MEDIA_TYPES.get(path.suffix.lstrip(".").lower())
@@ -106,6 +114,51 @@ def _text_block(parts: list[str]) -> llm.Text:
 def _goal_block(store: Store) -> str:
     goal = store.get_setting("goal_prompt").strip()
     return f"用户的目标:{goal}\n" if goal else ""
+
+
+def _now_line(store: Store) -> str:
+    return f"当前时间:{store.now().strftime('%Y-%m-%d %H:%M (%A)')}"
+
+
+def _day_context(store: Store, date: str) -> str:
+    """The user's goal and targets plus what they ate on a date, as prompt text."""
+    meals = [m for m in store.list_meals(f"{date}T00:00:00", f"{date}T23:59:59")
+             if m["status"] == "done"]
+    meals_brief = [
+        {
+            "time": m["eaten_at"][11:16],
+            "meal_slot": m["meal_slot"],
+            "description": m["description"],
+            "kcal": m["kcal"],
+            **{key: m[key] for key in config.NUTRIENT_KEYS},
+        }
+        for m in meals
+    ]
+    totals = {
+        key: round(sum(m[key] or 0 for m in meals), 1)
+        for key in ("kcal", *config.NUTRIENT_KEYS)
+    }
+    targets = store.get_nutrient_targets()
+    return "\n".join(line for line in (
+        _goal_block(store).strip(),
+        f"每日卡路里目标:{store.get_setting('daily_kcal_target')} kcal",
+        f"每日营养目标(蛋白质/纤维为下限,其余为上限,JSON):{json.dumps(targets, ensure_ascii=False)}"
+        if targets else "",
+        f"{date} 已吃的各餐(JSON):{json.dumps(meals_brief, ensure_ascii=False)}",
+        f"{date} 已摄入合计(JSON):{json.dumps(totals, ensure_ascii=False)}",
+    ) if line)
+
+
+def _trend_context(store: Store, date: str) -> str:
+    """Daily totals of the week ending on a date and recent weights, as prompt text."""
+    day = datetime.fromisoformat(f"{date}T00:00:00").date()
+    week = store.daily_totals((day - timedelta(days=6)).isoformat(), date)
+    weights = store.list_weights((day - timedelta(days=13)).isoformat())
+    weights_brief = [{"date": w["measured_at"][:10], "kg": w["weight_kg"]} for w in weights]
+    return (
+        f"最近7天每日摄入汇总(JSON):{json.dumps(week, ensure_ascii=False)}\n"
+        f"最近14天体重记录(JSON):{json.dumps(weights_brief, ensure_ascii=False)}"
+    )
 
 
 def _meal_dict(meal: MealEstimate) -> dict:
@@ -160,10 +213,9 @@ def interpret_text(store: Store, text: str) -> dict:
         }
         for m in recent
     ]
-    now = store.now().strftime("%Y-%m-%d %H:%M (%A)")
     prompt = f"""你是饮食记录工具的解析器。用户从手机发来一条消息,可能是:记录一顿饭、修改已有记录、删除记录、记录体重。
 
-当前时间:{now}
+{_now_line(store)}
 最近的饮食记录(JSON):
 {json.dumps(recent_brief, ensure_ascii=False)}
 
@@ -211,29 +263,10 @@ def check_food(store: Store, image_rel_path: str) -> dict:
     Returns {"verdict", "advice", "estimate"}; estimate has the meal shape so an
     eaten check can be stored as a meal without another model call.
     """
-    today = store.today().isoformat()
-    meals = [m for m in store.list_meals(f"{today}T00:00:00", f"{today}T23:59:59")
-             if m["status"] == "done"]
-    meals_brief = [
-        {"meal_slot": m["meal_slot"], "description": m["description"], "kcal": m["kcal"]}
-        for m in meals
-    ]
-    totals = {
-        key: round(sum(m[key] or 0 for m in meals), 1)
-        for key in ("kcal", *config.NUTRIENT_KEYS)
-    }
-    targets = store.get_nutrient_targets()
-    targets_line = (
-        f"每日营养目标(蛋白质/纤维为下限,其余为上限,JSON):{json.dumps(targets, ensure_ascii=False)}\n"
-        if targets else ""
-    )
-    now = store.now().strftime("%Y-%m-%d %H:%M (%A)")
     prompt = f"""你是一位营养师。用户还没吃,拍了上面这张食物照片问你:这个能不能吃、吃了会怎样。
 
-当前时间:{now}
-{_goal_block(store)}每日卡路里目标:{store.get_setting("daily_kcal_target")} kcal
-{targets_line}今天已经吃的(JSON):{json.dumps(meals_brief, ensure_ascii=False)}
-今天已摄入合计(JSON):{json.dumps(totals, ensure_ascii=False)}
+{_now_line(store)}
+{_day_context(store, store.today().isoformat())}
 
 估算这份食物的营养成分(填 meal),结合今天剩余额度、当前时间和用户目标,给出 verdict 和 advice。"""
     result = _structured(
@@ -266,41 +299,60 @@ def nutrient_targets(store: Store) -> dict:
 
 def daily_advice(store: Store, date: str) -> str:
     """Generate the end-of-day advice paragraph for a date."""
-    meals = [m for m in store.list_meals(f"{date}T00:00:00", f"{date}T23:59:59")
-             if m["status"] == "done"]
-    meals_brief = [
-        {
-            "meal_slot": m["meal_slot"],
-            "description": m["description"],
-            "kcal": m["kcal"],
-            **{key: m[key] for key in config.NUTRIENT_KEYS},
-        }
-        for m in meals
-    ]
-    day = datetime.fromisoformat(f"{date}T00:00:00").date()
-    week = store.daily_totals((day - timedelta(days=6)).isoformat(), date)
-    weights = store.list_weights((day - timedelta(days=13)).isoformat())
-    weights_brief = [{"date": w["measured_at"][:10], "kg": w["weight_kg"]} for w in weights]
-    targets = store.get_nutrient_targets()
-    targets_line = (
-        f"每日营养目标(蛋白质/纤维为下限,其余为上限,JSON):{json.dumps(targets, ensure_ascii=False)}\n"
-        if targets else ""
-    )
     prompt = f"""你是一位营养师。根据用户 {date} 的饮食记录,写一段当日总结建议。
 
-{_goal_block(store)}每日卡路里目标:{store.get_setting("daily_kcal_target")} kcal
-{targets_line}
-当日各餐(JSON):
-{json.dumps(meals_brief, ensure_ascii=False)}
+{_day_context(store, date)}
 
-最近7天每日摄入汇总(JSON):
-{json.dumps(week, ensure_ascii=False)}
-
-最近14天体重记录(JSON):
-{json.dumps(weights_brief, ensure_ascii=False)}
+{_trend_context(store, date)}
 
 要求:中文,3-5句话,先评价当日摄入与目标的差距和营养结构,再结合近期趋势给出明天的具体建议。直接输出建议正文,不要标题、不要列表、不要输出其他内容。"""
     advice = _text(store, [_text_block([prompt])])
     if not advice:
         raise AIError("empty advice from model")
     return advice
+
+
+def chat_reply(store: Store, reply_id: int) -> str:
+    """Write the reply for a pending chat message, given the user's current data.
+
+    The conversation before the reply, ending on the question to answer, is the context.
+    """
+    turns = _chat_turns(store.chat_history(reply_id, CHAT_HISTORY_LIMIT))
+    if not turns or turns[-1].role != "user":
+        raise AIError("chat history does not end on a user message")
+    today = store.today().isoformat()
+    system = f"""你是饮食记录应用 bitewise 里的营养师助手,用户在对话里向你咨询饮食问题,例如今天剩下的热量还能吃什么、下一餐吃什么、最近吃得怎么样。
+
+以下是用户此刻的数据,每次提问时都会更新,以它为准:
+{_now_line(store)}
+餐次时间划分(JSON,其余时间算加餐):{store.get_setting("meal_slots")}
+{_day_context(store, today)}
+{_trend_context(store, today)}
+
+要求:
+- 用中文回答,简洁直接,先给结论;推荐食物时具体到食物、大致分量和估算热量,并说明吃完后今天还剩多少额度。
+- 结合剩余热量和营养目标的缺口、当前时间和餐次、用户目标以及近期趋势来给建议。
+- 输出纯文本,可以分段或用「1. 」「- 」开头的短行,不要使用 Markdown 语法(不要 #、**、表格)。
+- 你只能提供建议,不能替用户记录或修改数据;用户想记录饮食或体重时,提醒他用应用的记录入口。
+- 数据里没有的信息不要编造;问题与饮食、营养、健康无关时简短说明你只负责这方面。"""
+    reply = _chat(store, system, turns, effort=CHAT_EFFORT)
+    if not reply:
+        raise AIError("empty reply from model")
+    return reply
+
+
+def _chat_turns(history: list[dict]) -> list[llm.Turn]:
+    """Stored messages as strictly alternating turns that start with the user.
+
+    A window cut mid-exchange starts on a reply, and a question whose reply
+    failed is followed by another question; providers accept neither.
+    """
+    turns: list[llm.Turn] = []
+    for message in history:
+        if not turns and message["role"] != "user":
+            continue
+        if turns and turns[-1].role == message["role"]:
+            turns[-1] = llm.Turn(message["role"], f"{turns[-1].text}\n\n{message['content']}")
+        else:
+            turns.append(llm.Turn(message["role"], message["content"]))
+    return turns

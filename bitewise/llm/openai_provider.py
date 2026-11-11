@@ -5,7 +5,7 @@ import os
 import openai
 import pydantic
 
-from . import REQUEST_TIMEOUT, AIError, Effort, Image, Part, Text, TModel
+from . import REQUEST_TIMEOUT, AIError, Effort, Image, Part, Text, TModel, Turn
 
 
 class OpenAIProvider:
@@ -27,21 +27,30 @@ class OpenAIProvider:
         return openai.OpenAI(api_key=api_key, base_url=self.base_url, timeout=REQUEST_TIMEOUT)
 
     def structured(self, model: str, parts: list[Part], schema: type[TModel], effort: Effort) -> TModel:
-        message = self._send(self._client.chat.completions.parse, model, parts, effort, response_format=schema)
+        message = self._send(
+            self._client.chat.completions.parse, model, [_user_message(parts)], effort, response_format=schema)
         if message.parsed is None:
             raise AIError("model returned no structured output")
         return message.parsed
 
     def text(self, model: str, parts: list[Part], effort: Effort) -> str:
-        message = self._send(self._client.chat.completions.create, model, parts, effort)
+        message = self._send(self._client.chat.completions.create, model, [_user_message(parts)], effort)
         return (message.content or "").strip()
 
-    def _send(self, request, model: str, parts: list[Part], effort: Effort, **extra):
+    def chat(self, model: str, system: str, turns: list[Turn], effort: Effort) -> str:
+        messages = [
+            {"role": "system", "content": system},
+            *({"role": turn.role, "content": turn.text} for turn in turns),
+        ]
+        message = self._send(self._client.chat.completions.create, model, messages, effort)
+        return (message.content or "").strip()
+
+    def _send(self, request, model: str, messages: list[dict], effort: Effort, **extra):
         try:
             response = request(
                 model=model,
                 reasoning_effort=effort,
-                messages=[{"role": "user", "content": [_content(part) for part in parts]}],
+                messages=messages,
                 **extra,
             )
         except openai.LengthFinishReasonError as exc:
@@ -68,6 +77,10 @@ class OpenAIProvider:
         if choice.finish_reason == "length":
             raise AIError("model response was cut off at the token limit")
         return choice.message
+
+
+def _user_message(parts: list[Part]) -> dict:
+    return {"role": "user", "content": [_content(part) for part in parts]}
 
 
 def _content(part: Part) -> dict:
